@@ -287,9 +287,15 @@ def _apply_yearly_increment(
     for column in columns:
         if column not in new_df.columns:
             continue
+        numeric_series = pd.to_numeric(new_df[column], errors="coerce")
+        if numeric_series.notna().sum() == 0:
+            # nothing numeric to increment; leave column as-is
+            continue
+        # ensure the column can hold floating point results from the increment
+        new_df[column] = numeric_series.astype("Float64")
         prev_value: Optional[float] = None
-        for idx in range(len(new_df)):
-            current = pd.to_numeric(new_df.at[idx, column], errors="coerce")
+        for idx in new_df.index:
+            current = new_df.at[idx, column]
             if prev_value is None:
                 if not pd.isna(current):
                     prev_value = float(current)

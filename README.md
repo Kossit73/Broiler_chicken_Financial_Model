@@ -58,12 +58,13 @@ pip install streamlit pandas
 streamlit run streamlit_app.py
 ```
 
-The dashboard organises the inputs into horizontal tabs that mirror the CLI
-assumption schedule. As you tweak values, the NPV/IRR metrics and detailed
-tables refresh instantly. The Production tab now houses the four-part
-assumptions summary as well as dedicated revenue schedules for broilers, eggs,
-manure, live birds, and by-products. Download buttons on each table let you
-export the current view as CSV files.
+The dashboard now presents all inputs on a single **Input Landing Page** that
+groups controls into Production, Pricing, Costs, and Capital & financing
+sections. As you tweak values, the NPV/IRR metrics and detailed tables refresh
+instantly. The Production tab continues to house the four-part assumptions
+summary as well as dedicated revenue schedules for broilers, eggs, manure, live
+birds, and by-products. Download buttons on each table let you export the
+current view as CSV files.
 
 ## Revenue schedules helper (optional)
 

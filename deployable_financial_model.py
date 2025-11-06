@@ -14,7 +14,7 @@ import csv
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Any, Dict, Iterable, List
 
 
 @dataclass
@@ -364,6 +364,35 @@ def write_json(path: Path, data):
         json.dump(data, fh, indent=2)
 
 
+def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
+    """Run the financial model and return structured outputs."""
+
+    cycles = compute_cycles(assumptions)
+    annual = annual_summary(assumptions, cycles)
+    cashflows = discounted_cash_flow(assumptions, annual)
+
+    valuation_cashflows = [row.free_cash_flow for row in cashflows]
+    discount_rate = assumptions.discount_rate
+    model_npv = npv(discount_rate, valuation_cashflows)
+    model_irr = irr(valuation_cashflows)
+
+    valuation = {
+        "discount_rate": discount_rate,
+        "npv": model_npv,
+        "irr": model_irr,
+        "initial_investment": cashflows[0].free_cash_flow,
+        "terminal_year": cashflows[-1].year,
+    }
+
+    return {
+        "assumptions": assumptions,
+        "cycles": cycles,
+        "annual": annual,
+        "cashflows": cashflows,
+        "valuation": valuation,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate broiler chicken financial model outputs.")
     parser.add_argument("--out", required=True, help="Directory where outputs will be written")
@@ -373,15 +402,12 @@ def main() -> None:
     output_dir = Path(args.out)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    assumptions = Assumptions()
-    cycles = compute_cycles(assumptions)
-    annual = annual_summary(assumptions, cycles)
-    cashflows = discounted_cash_flow(assumptions, annual)
-
-    valuation_cashflows = [row.free_cash_flow for row in cashflows]
-    discount_rate = assumptions.discount_rate
-    model_npv = npv(discount_rate, valuation_cashflows)
-    model_irr = irr(valuation_cashflows)
+    results = generate_model_outputs(Assumptions())
+    assumptions = results["assumptions"]
+    cycles = results["cycles"]
+    annual = results["annual"]
+    cashflows = results["cashflows"]
+    valuation = results["valuation"]
 
     if "csv" in args.formats:
         write_csv(output_dir / "assumptions.csv", [{"name": k, "value": v} for k, v in asdict(assumptions).items()])
@@ -395,13 +421,6 @@ def main() -> None:
         write_json(output_dir / "annual_summary.json", asdict(annual))
         write_json(output_dir / "cash_flow.json", [asdict(row) for row in cashflows])
 
-    valuation = {
-        "discount_rate": discount_rate,
-        "npv": model_npv,
-        "irr": model_irr,
-        "initial_investment": cashflows[0].free_cash_flow,
-        "terminal_year": cashflows[-1].year,
-    }
     write_json(output_dir / "valuation.json", valuation)
 
     write_json(
@@ -409,13 +428,13 @@ def main() -> None:
         {
             "cycles_per_year": assumptions.cycles_per_year,
             "years": len(cashflows) - 1,
-            "files": sorted(p.name for p in output_dir.iterdir()),
+            "files": sorted(p.name for p in output_dir.iterdir() if p.is_file()),
         },
     )
 
     print("✅ Financial model generated. Outputs written to", output_dir)
-    print(f"NPV @ {discount_rate:.1%}: {model_npv:,.0f}")
-    print(f"IRR: {model_irr:.2%}")
+    print(f"NPV @ {valuation['discount_rate']:.1%}: {valuation['npv']:,.0f}")
+    print(f"IRR: {valuation['irr']:.2%}")
 
 
 if __name__ == "__main__":

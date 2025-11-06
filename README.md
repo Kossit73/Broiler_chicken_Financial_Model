@@ -4,11 +4,13 @@ This repository contains a fully scripted broiler chicken financial model that
 runs without Excel or third-party Python dependencies.  The model codifies key
 production assumptions, per-cycle economics, annual rollups, debt service, and
 10-year discounted cash flow valuation metrics.  Results can be exported to CSV
-and/or JSON for further analysis.
+and/or JSON for further analysis.  An optional Streamlit dashboard lets you
+interactively explore the assumptions and outputs.
 
 ## Contents
 
 - `deployable_financial_model.py` – CLI that generates the model outputs.
+- `streamlit_app.py` – Streamlit UI that wraps the same model logic.
 - `outputs/` *(created when you run the CLI)* – contains CSV/JSON tables,
   valuation summary, and a manifest of generated files.
 
@@ -37,3 +39,17 @@ The command creates the `outputs/` directory (if needed) and writes:
 All values are expressed in US dollars except where otherwise noted.  Adjust the
 `Assumptions` dataclass in `deployable_financial_model.py` to model different
 operations (e.g., number of birds, pricing, debt structure, or cost inflation).
+
+## Interactive dashboard (optional)
+
+To experiment with the model in a browser-based UI, install the required
+packages and launch Streamlit:
+
+```bash
+pip install streamlit pandas
+streamlit run streamlit_app.py
+```
+
+The dashboard exposes all key assumptions in the sidebar. As you tweak values,
+the NPV/IRR metrics and detailed tables refresh instantly. Download buttons are
+available on each tab if you want to export the tables as CSV files.

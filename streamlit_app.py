@@ -5,7 +5,8 @@ from __future__ import annotations
 import copy
 from dataclasses import asdict, dataclass
 from io import BytesIO
-from typing import Any, Dict, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -183,6 +184,230 @@ class ScenarioModel:
 
     scenario: str
     assumptions: Assumptions
+
+
+def _initialise_schedule_state(
+    namespace: str,
+    scenario: str,
+    schedule_key: str,
+    default_rows: List[Dict[str, Any]],
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Return the stored DataFrame for a schedule, initialising from defaults as needed."""
+
+    store = st.session_state.setdefault(namespace, {})
+    scenario_store = store.setdefault(scenario, {})
+    default_records = copy.deepcopy(default_rows)
+    state = scenario_store.get(schedule_key)
+    if state is None:
+        state = {
+            "data": copy.deepcopy(default_records),
+            "default": copy.deepcopy(default_records),
+        }
+        scenario_store[schedule_key] = state
+    else:
+        stored_data = state.get("data", [])
+        stored_default = state.get("default", [])
+        if stored_data == stored_default and stored_default != default_records:
+            state["data"] = copy.deepcopy(default_records)
+            state["default"] = copy.deepcopy(default_records)
+    df = pd.DataFrame(state.get("data", default_records))
+    return df, state
+
+
+def _next_period_label(df: pd.DataFrame) -> str:
+    """Generate a reasonable period label for a newly added row."""
+
+    if "Period" not in df.columns or df["Period"].dropna().empty:
+        return f"Period {len(df) + 1}"
+    last_value = str(df["Period"].dropna().iloc[-1]).strip()
+    parts = last_value.split()
+    if parts and parts[-1].isdigit():
+        prefix = " ".join(parts[:-1]) or "Period"
+        return f"{prefix} {int(parts[-1]) + 1}"
+    match = re.search(r"(\d+)(?!.*\d)", last_value)
+    if match:
+        number = int(match.group(1)) + 1
+        prefix = last_value[: match.start()].strip() or "Period"
+        suffix = last_value[match.end() :].strip()
+        if suffix:
+            return f"{prefix} {number} {suffix}".strip()
+        return f"{prefix} {number}".strip()
+    return f"Period {len(df) + 1}"
+
+
+def _ensure_fixed_columns(
+    df: pd.DataFrame, fixed_columns: Optional[Dict[str, Any]]
+) -> pd.DataFrame:
+    if not fixed_columns:
+        return df
+    new_df = df.copy()
+    for column, value in fixed_columns.items():
+        if column in new_df.columns:
+            new_df[column] = value
+    return new_df
+
+
+def _add_schedule_row(
+    df: pd.DataFrame,
+    row_defaults: Optional[Dict[str, Any]] = None,
+    fixed_columns: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
+    """Append a new row using defaults and fixed column values."""
+
+    new_row = {col: None for col in df.columns}
+    defaults = row_defaults or {}
+    for column, value in defaults.items():
+        if column in new_row:
+            new_row[column] = copy.deepcopy(value)
+    if "Period" in df.columns and "Period" not in defaults:
+        new_row["Period"] = _next_period_label(df)
+    if fixed_columns:
+        for column, value in fixed_columns.items():
+            if column in new_row:
+                new_row[column] = value
+    return pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+
+def _apply_yearly_increment(
+    df: pd.DataFrame, columns: List[str], rate: float
+) -> pd.DataFrame:
+    """Apply a compound yearly increment across rows for selected columns."""
+
+    if not columns or rate == 0.0 or df.empty:
+        return df
+    new_df = df.copy()
+    for column in columns:
+        if column not in new_df.columns:
+            continue
+        prev_value: Optional[float] = None
+        for idx in range(len(new_df)):
+            current = pd.to_numeric(new_df.at[idx, column], errors="coerce")
+            if prev_value is None:
+                if not pd.isna(current):
+                    prev_value = float(current)
+                continue
+            prev_value = prev_value * (1 + rate)
+            new_df.at[idx, column] = prev_value
+    return new_df
+
+
+def _auto_compute_revenue(df: pd.DataFrame) -> pd.DataFrame:
+    """Recompute revenue when units and price are available."""
+
+    if not {"Units", "Unit price", "Revenue"}.issubset(df.columns):
+        return df
+    new_df = df.copy()
+    for idx in range(len(new_df)):
+        units = pd.to_numeric(new_df.at[idx, "Units"], errors="coerce")
+        price = pd.to_numeric(new_df.at[idx, "Unit price"], errors="coerce")
+        if pd.isna(units) or pd.isna(price):
+            continue
+        new_df.at[idx, "Revenue"] = float(units) * float(price)
+    return new_df
+
+
+def _sanitize_key(label: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z_]+", "_", label.lower()).strip("_") or "schedule"
+
+
+def _render_schedule_editor(
+    title: str,
+    schedule_key: str,
+    default_rows: List[Dict[str, Any]],
+    scenario: str,
+    namespace: str,
+    *,
+    fixed_columns: Optional[Dict[str, Any]] = None,
+    row_defaults: Optional[Dict[str, Any]] = None,
+    allow_yearly_increment: bool = True,
+    auto_update_revenue: bool = False,
+) -> pd.DataFrame:
+    """Render an editable schedule with add/remove and yearly increment controls."""
+
+    st.markdown(f"**{title}**")
+    df, state = _initialise_schedule_state(namespace, scenario, schedule_key, default_rows)
+    df = df.convert_dtypes()
+    original_columns = list(df.columns)
+
+    fixed_columns = fixed_columns or {}
+    row_defaults = row_defaults or {}
+
+    controls = st.columns(2)
+    operation_applied = False
+    if controls[0].button(
+        "Add row",
+        key=f"add_{namespace}_{schedule_key}_{scenario}",
+    ):
+        df = _add_schedule_row(df, row_defaults=row_defaults, fixed_columns=fixed_columns)
+        operation_applied = True
+    if controls[1].button(
+        "Remove row",
+        key=f"remove_{namespace}_{schedule_key}_{scenario}",
+    ):
+        if not df.empty:
+            df = df.iloc[:-1].reset_index(drop=True)
+            operation_applied = True
+
+    df = _ensure_fixed_columns(df, fixed_columns)
+
+    numeric_columns = [
+        column
+        for column in df.columns
+        if pd.to_numeric(df[column], errors="coerce").notna().sum() > 0
+    ]
+
+    if allow_yearly_increment and numeric_columns:
+        inc_cols, inc_rate_col, inc_btn_col = st.columns([2, 1, 1])
+        selected_columns = inc_cols.multiselect(
+            "Yearly increment columns",
+            options=numeric_columns,
+            default=numeric_columns,
+            key=f"inc_cols_{namespace}_{schedule_key}_{scenario}",
+            help="Select numeric columns that should follow the yearly increment growth.",
+        )
+        increment_rate = inc_rate_col.number_input(
+            "Yearly increment (%)",
+            min_value=-100.0,
+            max_value=100.0,
+            value=0.0,
+            step=0.5,
+            key=f"inc_rate_{namespace}_{schedule_key}_{scenario}",
+        )
+        if inc_btn_col.button(
+            "Apply yearly increment",
+            key=f"apply_inc_{namespace}_{schedule_key}_{scenario}",
+        ):
+            if selected_columns:
+                df = _apply_yearly_increment(df, selected_columns, increment_rate / 100.0)
+                operation_applied = True
+            else:
+                st.warning("Select at least one column before applying an increment.")
+    elif allow_yearly_increment:
+        st.caption("No numeric columns available for yearly increment.")
+
+    if operation_applied and auto_update_revenue:
+        df = _auto_compute_revenue(df)
+
+    df = _ensure_fixed_columns(df, fixed_columns)
+
+    column_config: Dict[str, Any] = {}
+    if fixed_columns:
+        for column in fixed_columns:
+            column_config[column] = st.column_config.TextColumn(disabled=True)
+
+    edited_df = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config,
+        key=f"editor_{namespace}_{schedule_key}_{scenario}",
+    )
+
+    edited_df = pd.DataFrame(edited_df)
+    edited_df = _ensure_fixed_columns(edited_df, fixed_columns)
+    state["data"] = edited_df.replace({pd.NA: None}).to_dict("records")
+    return edited_df.reindex(columns=original_columns, fill_value=None)
 def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = None) -> None:
     """Render AI and machine-learning configuration controls."""
 
@@ -658,19 +883,50 @@ def main() -> None:
                 st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
         st.subheader("Assumptions summary")
+        updated_assumptions: List[Dict[str, Any]] = []
         for schedule_name, group in assumption_schedule_df.groupby("schedule", sort=False):
-            st.markdown(f"**{schedule_name}**")
-            st.dataframe(
-                group.drop(columns=["schedule"]),
-                use_container_width=True,
-                hide_index=True,
+            schedule_key = _sanitize_key(schedule_name)
+            defaults = group.drop(columns=["schedule"]).to_dict("records")
+            edited_df = _render_schedule_editor(
+                schedule_name,
+                schedule_key,
+                defaults,
+                selected_scenario,
+                namespace="assumption_schedule_state",
+                allow_yearly_increment=True,
             )
+            for record in edited_df.replace({pd.NA: None}).to_dict("records"):
+                merged = {"schedule": schedule_name}
+                merged.update(record)
+                updated_assumptions.append(merged)
+        if updated_assumptions:
+            results["assumptions_schedule"] = updated_assumptions
 
         st.subheader("Revenue schedules")
+        updated_revenue: Dict[str, List[Dict[str, Any]]] = {}
         for category, rows in revenue_schedules.items():
-            st.markdown(f"**{category}**")
-            schedule_df = pd.DataFrame(rows)
-            st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+            schedule_key = _sanitize_key(category)
+            defaults = copy.deepcopy(rows)
+            row_defaults: Dict[str, Any] = {}
+            if rows:
+                row_defaults["Notes"] = rows[0].get("Notes")
+            edited_df = _render_schedule_editor(
+                category,
+                schedule_key,
+                defaults,
+                selected_scenario,
+                namespace="revenue_schedule_state",
+                fixed_columns={"Category": category},
+                row_defaults=row_defaults,
+                allow_yearly_increment=True,
+                auto_update_revenue=True,
+            )
+            updated_revenue[category] = (
+                edited_df.replace({pd.NA: None}).to_dict("records")
+            )
+        if updated_revenue:
+            revenue_schedules = updated_revenue
+            results["revenue_schedules"] = updated_revenue
 
         st.subheader("Production cycles")
         st.dataframe(cycles_df, use_container_width=True)
@@ -723,6 +979,7 @@ def main() -> None:
     scenario_payloads = st.session_state.get("scenario_payloads")
     if scenario_payloads and selected_scenario in scenario_payloads:
         scenario_payloads[selected_scenario]["snapshot"] = copy.deepcopy(payload)
+        scenario_payloads[selected_scenario]["results"] = results
 
     st.markdown("---")
     st.caption("Use the Input Landing Page above to adjust the operating model and financing structure.")

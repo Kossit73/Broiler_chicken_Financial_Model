@@ -1126,6 +1126,21 @@ def main() -> None:
     balance_df = pd.DataFrame([asdict(row) for row in financials["balance_sheet"]])
     cash_statement_df = pd.DataFrame([asdict(row) for row in financials["cash_flow_statement"]])
     loan_df = pd.DataFrame(financials["loan_schedule"])
+    asset_schedule_df = (
+        balance_df[
+            ["year", "cash", "working_capital", "net_ppe", "total_assets"]
+        ]
+        .copy()
+        .rename(
+            columns={
+                "year": "Year",
+                "cash": "Ending cash",
+                "working_capital": "Working capital",
+                "net_ppe": "Net PP&E",
+                "total_assets": "Total assets",
+            }
+        )
+    )
     metrics_df = pd.DataFrame(advanced["metrics"])
     dscr_df = pd.DataFrame(advanced["dscr"])
     trend_df = pd.DataFrame(advanced["trend"])
@@ -1219,6 +1234,12 @@ def main() -> None:
 
         st.subheader("Discounted cash flows")
         st.dataframe(cashflow_df, use_container_width=True)
+
+        st.subheader("Debt schedule")
+        st.dataframe(loan_df, use_container_width=True, hide_index=True)
+
+        st.subheader("Asset schedule")
+        st.dataframe(asset_schedule_df, use_container_width=True, hide_index=True)
 
     with financials_tab:
         fin_tab1, fin_tab2, fin_tab3, fin_tab4 = st.tabs(

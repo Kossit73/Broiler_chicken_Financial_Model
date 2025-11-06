@@ -595,7 +595,24 @@ def main() -> None:
     payload = scenario_store[selected_scenario]
 
     defaults = Assumptions(**payload.get("assumptions", {}))
-    assumptions = assumptions_form(defaults)
+
+    (
+        input_tab,
+        production_tab,
+        financials_tab,
+        analytics_tab,
+    ) = st.tabs(
+        [
+            "Input Landing Page",
+            "Production & revenues",
+            "Financial statements",
+            "Advanced analytics",
+        ]
+    )
+
+    with input_tab:
+        assumptions = assumptions_form(defaults)
+
     payload["assumptions"] = asdict(assumptions)
 
     ai_settings = _payload_to_ai_settings(payload)
@@ -637,10 +654,7 @@ def main() -> None:
     dscr_df = pd.DataFrame(advanced["dscr"])
     trend_df = pd.DataFrame(advanced["trend"])
 
-    overview_tab, financials_tab, analytics_tab = st.tabs(
-        ["Production & revenues", "Financial statements", "Advanced analytics"]
-    )
-    with overview_tab:
+    with production_tab:
         download_container = st.container()
         excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
         excel_bytes = excel_map.get(selected_scenario)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from io import StringIO
+from io import BytesIO
 
 import pandas as pd
 import streamlit as st
@@ -12,13 +12,28 @@ from deployable_financial_model import Assumptions, generate_model_outputs
 
 
 def to_csv(dataframe: pd.DataFrame) -> bytes:
-    buffer = StringIO()
-    dataframe.to_csv(buffer, index=False)
-    return buffer.getvalue().encode("utf-8")
+    """Return the CSV representation of ``dataframe`` as UTF-8 bytes."""
+
+    if dataframe is None or dataframe.empty:
+        return b""
+
+    buffer = BytesIO()
+    buffer.write(dataframe.to_csv(index=False).encode("utf-8"))
+    return buffer.getvalue()
 
 
 def render_download_button(label: str, dataframe: pd.DataFrame, file_name: str):
-    st.download_button(label, data=to_csv(dataframe), file_name=file_name, mime="text/csv")
+    csv_bytes = to_csv(dataframe)
+    disabled = len(csv_bytes) == 0
+    st.download_button(
+        label,
+        data=csv_bytes,
+        file_name=file_name,
+        mime="text/csv",
+        disabled=disabled,
+        key=f"download-{file_name}",
+        help="CSV download is unavailable" if disabled else None,
+    )
 
 
 def assumptions_form(defaults: Assumptions) -> Assumptions:
@@ -125,13 +140,13 @@ def main() -> None:
 
     tab1, tab2, tab3 = st.tabs(["Production cycles", "Annual summary", "Cash flows"])
     with tab1:
-        st.dataframe(cycles_df)
+        st.dataframe(cycles_df, use_container_width=True)
         render_download_button("Download cycles CSV", cycles_df, "production_cycles.csv")
     with tab2:
-        st.dataframe(annual_df)
+        st.dataframe(annual_df, use_container_width=True)
         render_download_button("Download annual CSV", annual_df, "annual_summary.csv")
     with tab3:
-        st.dataframe(cashflow_df)
+        st.dataframe(cashflow_df, use_container_width=True)
         render_download_button("Download cash flow CSV", cashflow_df, "cash_flow.csv")
 
     st.markdown("---")

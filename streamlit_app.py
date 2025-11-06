@@ -703,261 +703,324 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
     _render_ai_settings(payload, ai_container)
 
     st.subheader("Input Landing Page")
+    st.caption("Adjust the production, pricing, cost, and capital structure assumptions below.")
 
-    st.markdown("**Production**")
-    col_a, col_b = st.columns(2)
-    cycles_per_year = col_a.number_input(
-        "Cycles per year", min_value=1, max_value=12, value=defaults.cycles_per_year
-    )
-    birds_per_cycle = col_b.number_input(
-        "Birds per cycle",
-        min_value=1000,
-        max_value=100000,
-        value=defaults.birds_per_cycle,
-        step=1000,
-    )
-    mortality_rate = col_a.number_input(
-        "Mortality rate",
-        min_value=0.0,
-        max_value=0.2,
-        value=defaults.mortality_rate,
-        step=0.005,
-        format="%.3f",
-    )
-    final_weight_kg = col_b.number_input(
-        "Final weight (kg)",
-        min_value=1.0,
-        max_value=4.0,
-        value=defaults.final_weight_kg,
-        step=0.1,
-    )
+    values: Dict[str, Any] = {}
 
-    st.markdown("**Pricing**")
-    col_a, col_b = st.columns(2)
-    live_price_per_kg = col_a.number_input(
-        "Live price per kg",
-        min_value=0.5,
-        max_value=5.0,
-        value=defaults.live_price_per_kg,
-        step=0.05,
-    )
-    price_growth = col_b.number_input(
-        "Annual price growth",
-        min_value=-0.05,
-        max_value=0.1,
-        value=defaults.price_growth,
-        step=0.005,
-        format="%.3f",
-    )
+    def render_section(
+        title: str,
+        fields: List[Dict[str, Any]],
+        columns: int = 3,
+    ) -> None:
+        """Render a grouped section with evenly spaced inputs."""
 
-    st.markdown("**Costs**")
-    col_a, col_b = st.columns(2)
-    feed_conversion_ratio = col_a.number_input(
-        "Feed conversion ratio",
-        min_value=1.0,
-        max_value=2.5,
-        value=defaults.feed_conversion_ratio,
-        step=0.05,
-    )
-    feed_cost_per_kg = col_b.number_input(
-        "Feed cost per kg",
-        min_value=0.2,
-        max_value=1.0,
-        value=defaults.feed_cost_per_kg,
-        step=0.01,
-    )
-    chick_cost = col_a.number_input(
-        "Chick cost",
-        min_value=0.3,
-        max_value=2.0,
-        value=defaults.chick_cost,
-        step=0.05,
-    )
-    processing_cost_per_bird = col_b.number_input(
-        "Processing cost per bird",
-        min_value=0.05,
-        max_value=1.0,
-        value=defaults.processing_cost_per_bird,
-        step=0.05,
-    )
-    vaccination_cost_per_bird = col_a.number_input(
-        "Vaccination cost per bird",
-        min_value=0.0,
-        max_value=0.5,
-        value=defaults.vaccination_cost_per_bird,
-        step=0.01,
-    )
-    litter_disposal_per_cycle = col_b.number_input(
-        "Litter & disposal per cycle",
-        min_value=0.0,
-        max_value=10000.0,
-        value=defaults.litter_disposal_per_cycle,
-        step=100.0,
-    )
-    propane_per_cycle = col_a.number_input(
-        "Propane per cycle",
-        min_value=0.0,
-        max_value=20000.0,
-        value=defaults.propane_per_cycle,
-        step=100.0,
-    )
-    electricity_per_cycle = col_b.number_input(
-        "Electricity per cycle",
-        min_value=0.0,
-        max_value=10000.0,
-        value=defaults.electricity_per_cycle,
-        step=100.0,
-    )
-    labor_per_cycle = col_a.number_input(
-        "Labor per cycle",
-        min_value=0.0,
-        max_value=50000.0,
-        value=defaults.labor_per_cycle,
-        step=500.0,
-    )
-    maintenance_per_cycle = col_b.number_input(
-        "Maintenance per cycle",
-        min_value=0.0,
-        max_value=10000.0,
-        value=defaults.maintenance_per_cycle,
-        step=100.0,
-    )
-    management_fee_per_cycle = col_a.number_input(
-        "Management fee per cycle",
-        min_value=0.0,
-        max_value=10000.0,
-        value=defaults.management_fee_per_cycle,
-        step=100.0,
-    )
-    insurance_per_cycle = col_b.number_input(
-        "Insurance per cycle",
-        min_value=0.0,
-        max_value=10000.0,
-        value=defaults.insurance_per_cycle,
-        step=100.0,
-    )
-    overhead_per_cycle = col_a.number_input(
-        "Overhead per cycle",
-        min_value=0.0,
-        max_value=10000.0,
-        value=defaults.overhead_per_cycle,
-        step=100.0,
-    )
-    cost_inflation = col_b.number_input(
-        "Cost inflation",
-        min_value=-0.05,
-        max_value=0.1,
-        value=defaults.cost_inflation,
-        step=0.005,
-        format="%.3f",
+        with st.container():
+            st.markdown(f"### {title}")
+            cols = st.columns(columns)
+            for idx, field in enumerate(fields):
+                col = cols[idx % columns]
+                attr = field["attr"]
+                label = field["label"]
+                dtype = field.get("type", "float")
+                min_value = field.get("min")
+                max_value = field.get("max")
+                step = field.get("step")
+                fmt = field.get("format")
+
+                default_val = getattr(defaults, attr)
+
+                input_kwargs: Dict[str, Any] = {}
+                if dtype == "int":
+                    input_kwargs["value"] = int(default_val)
+                    input_kwargs["step"] = int(step) if step is not None else 1
+                    if min_value is not None:
+                        input_kwargs["min_value"] = int(min_value)
+                    if max_value is not None:
+                        input_kwargs["max_value"] = int(max_value)
+                    values[attr] = col.number_input(label, **input_kwargs)
+                else:
+                    if min_value is not None:
+                        input_kwargs["min_value"] = float(min_value)
+                    if max_value is not None:
+                        input_kwargs["max_value"] = float(max_value)
+                    if step is not None:
+                        input_kwargs["step"] = float(step)
+                    if fmt is not None:
+                        input_kwargs["format"] = fmt
+                    input_kwargs["value"] = float(default_val)
+                    values[attr] = col.number_input(label, **input_kwargs)
+
+    render_section(
+        "Production",
+        [
+            {"attr": "cycles_per_year", "label": "Cycles per year", "min": 1, "max": 12, "type": "int"},
+            {
+                "attr": "birds_per_cycle",
+                "label": "Birds per cycle",
+                "min": 1000,
+                "max": 100000,
+                "step": 1000,
+                "type": "int",
+            },
+            {
+                "attr": "mortality_rate",
+                "label": "Mortality rate",
+                "min": 0.0,
+                "max": 0.2,
+                "step": 0.005,
+                "format": "%.3f",
+            },
+            {
+                "attr": "final_weight_kg",
+                "label": "Final weight (kg)",
+                "min": 1.0,
+                "max": 4.0,
+                "step": 0.1,
+            },
+        ],
+        columns=4,
     )
 
-    st.markdown("**Capital & financing**")
-    col_a, col_b = st.columns(2)
-    capex_housing = col_a.number_input(
-        "Housing capex",
-        min_value=0.0,
-        max_value=5000000.0,
-        value=defaults.capex_housing,
-        step=10000.0,
+    render_section(
+        "Pricing",
+        [
+            {
+                "attr": "live_price_per_kg",
+                "label": "Live price per kg",
+                "min": 0.5,
+                "max": 5.0,
+                "step": 0.05,
+            },
+            {
+                "attr": "price_growth",
+                "label": "Annual price growth",
+                "min": -0.05,
+                "max": 0.1,
+                "step": 0.005,
+                "format": "%.3f",
+            },
+        ],
+        columns=2,
     )
-    capex_equipment = col_b.number_input(
-        "Equipment capex",
-        min_value=0.0,
-        max_value=2000000.0,
-        value=defaults.capex_equipment,
-        step=5000.0,
+
+    render_section(
+        "Operating costs",
+        [
+            {
+                "attr": "feed_conversion_ratio",
+                "label": "Feed conversion ratio",
+                "min": 1.0,
+                "max": 2.5,
+                "step": 0.05,
+            },
+            {
+                "attr": "feed_cost_per_kg",
+                "label": "Feed cost per kg",
+                "min": 0.2,
+                "max": 1.0,
+                "step": 0.01,
+            },
+            {
+                "attr": "chick_cost",
+                "label": "Chick cost",
+                "min": 0.3,
+                "max": 2.0,
+                "step": 0.05,
+            },
+            {
+                "attr": "processing_cost_per_bird",
+                "label": "Processing cost per bird",
+                "min": 0.05,
+                "max": 1.0,
+                "step": 0.05,
+            },
+            {
+                "attr": "vaccination_cost_per_bird",
+                "label": "Vaccination cost per bird",
+                "min": 0.0,
+                "max": 0.5,
+                "step": 0.01,
+            },
+            {
+                "attr": "litter_disposal_per_cycle",
+                "label": "Litter & disposal per cycle",
+                "min": 0.0,
+                "max": 10000.0,
+                "step": 100.0,
+            },
+            {
+                "attr": "propane_per_cycle",
+                "label": "Propane per cycle",
+                "min": 0.0,
+                "max": 20000.0,
+                "step": 100.0,
+            },
+            {
+                "attr": "electricity_per_cycle",
+                "label": "Electricity per cycle",
+                "min": 0.0,
+                "max": 10000.0,
+                "step": 100.0,
+            },
+            {
+                "attr": "labor_per_cycle",
+                "label": "Labor per cycle",
+                "min": 0.0,
+                "max": 50000.0,
+                "step": 500.0,
+            },
+            {
+                "attr": "maintenance_per_cycle",
+                "label": "Maintenance per cycle",
+                "min": 0.0,
+                "max": 10000.0,
+                "step": 100.0,
+            },
+            {
+                "attr": "management_fee_per_cycle",
+                "label": "Management fee per cycle",
+                "min": 0.0,
+                "max": 10000.0,
+                "step": 100.0,
+            },
+            {
+                "attr": "insurance_per_cycle",
+                "label": "Insurance per cycle",
+                "min": 0.0,
+                "max": 10000.0,
+                "step": 100.0,
+            },
+            {
+                "attr": "overhead_per_cycle",
+                "label": "Overhead per cycle",
+                "min": 0.0,
+                "max": 10000.0,
+                "step": 100.0,
+            },
+            {
+                "attr": "cost_inflation",
+                "label": "Cost inflation",
+                "min": -0.05,
+                "max": 0.1,
+                "step": 0.005,
+                "format": "%.3f",
+            },
+        ],
+        columns=4,
     )
-    working_capital = col_a.number_input(
-        "Working capital",
-        min_value=0.0,
-        max_value=1000000.0,
-        value=defaults.working_capital,
-        step=5000.0,
-    )
-    depreciation_years = col_b.number_input(
-        "Depreciation years",
-        min_value=1,
-        max_value=40,
-        value=defaults.depreciation_years,
-    )
-    maintenance_capex_annual = col_a.number_input(
-        "Maintenance capex (annual)",
-        min_value=0.0,
-        max_value=200000.0,
-        value=defaults.maintenance_capex_annual,
-        step=5000.0,
-    )
-    debt_ratio = col_b.number_input(
-        "Debt ratio",
-        min_value=0.0,
-        max_value=1.0,
-        value=defaults.debt_ratio,
-        step=0.05,
-    )
-    debt_interest_rate = col_a.number_input(
-        "Debt interest rate",
-        min_value=0.0,
-        max_value=0.2,
-        value=defaults.debt_interest_rate,
-        step=0.005,
-        format="%.3f",
-    )
-    debt_term_years = col_b.number_input(
-        "Debt term (years)",
-        min_value=1,
-        max_value=30,
-        value=defaults.debt_term_years,
-    )
-    discount_rate = col_a.number_input(
-        "Discount rate",
-        min_value=0.0,
-        max_value=0.5,
-        value=defaults.discount_rate,
-        step=0.01,
-        format="%.3f",
-    )
-    tax_rate = col_b.number_input(
-        "Tax rate",
-        min_value=0.0,
-        max_value=0.5,
-        value=defaults.tax_rate,
-        step=0.01,
-        format="%.3f",
+
+    render_section(
+        "Capital & financing",
+        [
+            {
+                "attr": "capex_housing",
+                "label": "Housing capex",
+                "min": 0.0,
+                "max": 5000000.0,
+                "step": 10000.0,
+            },
+            {
+                "attr": "capex_equipment",
+                "label": "Equipment capex",
+                "min": 0.0,
+                "max": 2000000.0,
+                "step": 5000.0,
+            },
+            {
+                "attr": "working_capital",
+                "label": "Working capital",
+                "min": 0.0,
+                "max": 1000000.0,
+                "step": 5000.0,
+            },
+            {
+                "attr": "depreciation_years",
+                "label": "Depreciation years",
+                "min": 1,
+                "max": 40,
+                "type": "int",
+            },
+            {
+                "attr": "maintenance_capex_annual",
+                "label": "Maintenance capex (annual)",
+                "min": 0.0,
+                "max": 200000.0,
+                "step": 5000.0,
+            },
+            {
+                "attr": "debt_ratio",
+                "label": "Debt ratio",
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.05,
+            },
+            {
+                "attr": "debt_interest_rate",
+                "label": "Debt interest rate",
+                "min": 0.0,
+                "max": 0.2,
+                "step": 0.005,
+                "format": "%.3f",
+            },
+            {
+                "attr": "debt_term_years",
+                "label": "Debt term (years)",
+                "min": 1,
+                "max": 30,
+                "type": "int",
+            },
+            {
+                "attr": "discount_rate",
+                "label": "Discount rate",
+                "min": 0.0,
+                "max": 0.5,
+                "step": 0.01,
+                "format": "%.3f",
+            },
+            {
+                "attr": "tax_rate",
+                "label": "Tax rate",
+                "min": 0.0,
+                "max": 0.5,
+                "step": 0.01,
+                "format": "%.3f",
+            },
+        ],
+        columns=4,
     )
 
     return Assumptions(
         farm_name=farm_name,
-        cycles_per_year=int(cycles_per_year),
-        birds_per_cycle=int(birds_per_cycle),
-        mortality_rate=float(mortality_rate),
-        final_weight_kg=float(final_weight_kg),
-        live_price_per_kg=float(live_price_per_kg),
-        chick_cost=float(chick_cost),
-        feed_conversion_ratio=float(feed_conversion_ratio),
-        feed_cost_per_kg=float(feed_cost_per_kg),
-        processing_cost_per_bird=float(processing_cost_per_bird),
-        vaccination_cost_per_bird=float(vaccination_cost_per_bird),
-        litter_disposal_per_cycle=float(litter_disposal_per_cycle),
-        propane_per_cycle=float(propane_per_cycle),
-        electricity_per_cycle=float(electricity_per_cycle),
-        labor_per_cycle=float(labor_per_cycle),
-        maintenance_per_cycle=float(maintenance_per_cycle),
-        management_fee_per_cycle=float(management_fee_per_cycle),
-        insurance_per_cycle=float(insurance_per_cycle),
-        overhead_per_cycle=float(overhead_per_cycle),
-        capex_housing=float(capex_housing),
-        capex_equipment=float(capex_equipment),
-        working_capital=float(working_capital),
-        discount_rate=float(discount_rate),
-        price_growth=float(price_growth),
-        cost_inflation=float(cost_inflation),
-        tax_rate=float(tax_rate),
-        debt_ratio=float(debt_ratio),
-        debt_interest_rate=float(debt_interest_rate),
-        debt_term_years=int(debt_term_years),
-        depreciation_years=int(depreciation_years),
-        maintenance_capex_annual=float(maintenance_capex_annual),
+        cycles_per_year=int(values["cycles_per_year"]),
+        birds_per_cycle=int(values["birds_per_cycle"]),
+        mortality_rate=float(values["mortality_rate"]),
+        final_weight_kg=float(values["final_weight_kg"]),
+        live_price_per_kg=float(values["live_price_per_kg"]),
+        chick_cost=float(values["chick_cost"]),
+        feed_conversion_ratio=float(values["feed_conversion_ratio"]),
+        feed_cost_per_kg=float(values["feed_cost_per_kg"]),
+        processing_cost_per_bird=float(values["processing_cost_per_bird"]),
+        vaccination_cost_per_bird=float(values["vaccination_cost_per_bird"]),
+        litter_disposal_per_cycle=float(values["litter_disposal_per_cycle"]),
+        propane_per_cycle=float(values["propane_per_cycle"]),
+        electricity_per_cycle=float(values["electricity_per_cycle"]),
+        labor_per_cycle=float(values["labor_per_cycle"]),
+        maintenance_per_cycle=float(values["maintenance_per_cycle"]),
+        management_fee_per_cycle=float(values["management_fee_per_cycle"]),
+        insurance_per_cycle=float(values["insurance_per_cycle"]),
+        overhead_per_cycle=float(values["overhead_per_cycle"]),
+        capex_housing=float(values["capex_housing"]),
+        capex_equipment=float(values["capex_equipment"]),
+        working_capital=float(values["working_capital"]),
+        discount_rate=float(values["discount_rate"]),
+        price_growth=float(values["price_growth"]),
+        cost_inflation=float(values["cost_inflation"]),
+        tax_rate=float(values["tax_rate"]),
+        debt_ratio=float(values["debt_ratio"]),
+        debt_interest_rate=float(values["debt_interest_rate"]),
+        debt_term_years=int(values["debt_term_years"]),
+        depreciation_years=int(values["depreciation_years"]),
+        maintenance_capex_annual=float(values["maintenance_capex_annual"]),
     )
 def main() -> None:
     st.set_page_config(page_title="Broiler Chicken Financial Model", layout="wide")

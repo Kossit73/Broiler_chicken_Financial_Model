@@ -313,6 +313,7 @@ def main() -> None:
     results = generate_model_outputs(assumptions)
     valuation = results["valuation"]
     assumption_schedule_df = pd.DataFrame(results["assumptions_schedule"])
+    revenue_schedules = results["revenue_schedules"]
 
     col1, col2, col3 = st.columns(3)
     col1.metric("NPV", f"${valuation['npv']:,.0f}")
@@ -334,6 +335,24 @@ def main() -> None:
                 hide_index=True,
             )
         render_download_button("Download assumptions CSV", assumption_schedule_df, "assumptions_summary.csv")
+        st.subheader("Revenue schedules")
+        for category, rows in revenue_schedules.items():
+            st.markdown(f"**{category}**")
+            schedule_df = pd.DataFrame(rows)
+            st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+            safe_name = (
+                category.lower()
+                .replace(" ", "_")
+                .replace("(", "")
+                .replace(")", "")
+                .replace(",", "")
+                .replace("-", "_")
+            )
+            render_download_button(
+                f"Download {category.lower()} CSV",
+                schedule_df,
+                f"{safe_name}_schedule.csv",
+            )
         st.markdown("---")
         st.dataframe(cycles_df, use_container_width=True)
         render_download_button("Download cycles CSV", cycles_df, "production_cycles.csv")

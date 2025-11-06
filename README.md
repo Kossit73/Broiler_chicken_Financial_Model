@@ -38,6 +38,9 @@ The command creates the `outputs/` directory (if needed) and writes:
   metrics.
 - `cash_flow.(csv|json)` – 10-year cash flow statement with operating cash flow,
   maintenance capex, debt service, and discounted values.
+- Revenue schedule CSVs for each category (`broiler_revenue_schedule.csv`,
+  `eggs_revenue_schedule.csv`, etc.) plus `revenue_schedules.json` capturing all
+  five categories in one structure for downstream tooling.
 - `valuation.json` – NPV/IRR results using the modeled cash flows.
 - `manifest.json` – convenience listing of the generated files.
 
@@ -57,8 +60,10 @@ streamlit run streamlit_app.py
 
 The dashboard organises the inputs into horizontal tabs that mirror the CLI
 assumption schedule. As you tweak values, the NPV/IRR metrics and detailed
-tables refresh instantly. Download buttons are available on each tab, including
-the assumptions summary, if you want to export the tables as CSV files.
+tables refresh instantly. The Production tab now houses the four-part
+assumptions summary as well as dedicated revenue schedules for broilers, eggs,
+manure, live birds, and by-products. Download buttons on each table let you
+export the current view as CSV files.
 
 ## Revenue schedules helper (optional)
 

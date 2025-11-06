@@ -86,6 +86,14 @@ ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Financing", "Tax rate", "tax_rate"),
 ]
 
+REVENUE_CATEGORIES = [
+    "Broiler Revenue",
+    "Eggs Revenue",
+    "Poultry Manure Revenue",
+    "Live Birds Revenue",
+    "By-Product (feathers, offal, livers) Revenue",
+]
+
 
 @dataclass
 class CycleResults:
@@ -222,6 +230,49 @@ def build_assumptions_schedule(assumptions: Assumptions) -> List[Dict[str, Any]]
             }
         )
     return schedule_rows
+
+
+def build_revenue_schedules(
+    assumptions: Assumptions, cycles: Iterable[CycleResults]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Return revenue schedules for each poultry revenue category."""
+
+    schedules: Dict[str, List[Dict[str, Any]]] = {}
+
+    # Broiler revenue is derived from modelled production cycles.
+    unit_price = assumptions.final_weight_kg * assumptions.live_price_per_kg
+    broiler_rows: List[Dict[str, Any]] = []
+    for cycle in cycles:
+        broiler_rows.append(
+            {
+                "Category": "Broiler Revenue",
+                "Period": f"Cycle {cycle.cycle}",
+                "Units": cycle.survivors,
+                "Unit price": unit_price,
+                "Revenue": cycle.revenue,
+                "Notes": "Derived from production cycle results",
+            }
+        )
+    schedules["Broiler Revenue"] = broiler_rows
+
+    # Templates for other revenue categories so users can enter supplemental sales.
+    template_periods = assumptions.cycles_per_year or 1
+    for category in REVENUE_CATEGORIES[1:]:
+        template_rows = []
+        for period in range(1, template_periods + 1):
+            template_rows.append(
+                {
+                    "Category": category,
+                    "Period": f"Cycle {period}",
+                    "Units": None,
+                    "Unit price": None,
+                    "Revenue": None,
+                    "Notes": "Template (enter values)",
+                }
+            )
+        schedules[category] = template_rows
+
+    return schedules
 
 
 def compute_cycles(assumptions: Assumptions) -> List[CycleResults]:
@@ -422,6 +473,7 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
     cycles = compute_cycles(assumptions)
     annual = annual_summary(assumptions, cycles)
     cashflows = discounted_cash_flow(assumptions, annual)
+    revenue_schedules = build_revenue_schedules(assumptions, cycles)
 
     valuation_cashflows = [row.free_cash_flow for row in cashflows]
     discount_rate = assumptions.discount_rate
@@ -442,6 +494,7 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
         "cycles": cycles,
         "annual": annual,
         "cashflows": cashflows,
+        "revenue_schedules": revenue_schedules,
         "valuation": valuation,
     }
 
@@ -462,6 +515,7 @@ def main() -> None:
     annual = results["annual"]
     cashflows = results["cashflows"]
     valuation = results["valuation"]
+    revenue_schedules = results["revenue_schedules"]
 
     if "csv" in args.formats:
         write_csv(output_dir / "assumptions_summary.csv", assumption_schedule)
@@ -469,6 +523,16 @@ def main() -> None:
         write_csv(output_dir / "production_cycles.csv", [asdict(cycle) for cycle in cycles])
         write_csv(output_dir / "annual_summary.csv", [asdict(annual)])
         write_csv(output_dir / "cash_flow.csv", [asdict(row) for row in cashflows])
+        for category, rows in revenue_schedules.items():
+            safe = (
+                category.lower()
+                .replace(" ", "_")
+                .replace("(", "")
+                .replace(")", "")
+                .replace(",", "")
+                .replace("-", "_")
+            )
+            write_csv(output_dir / f"{safe}_schedule.csv", rows)
 
     if "json" in args.formats:
         write_json(output_dir / "assumptions.json", asdict(assumptions))
@@ -476,6 +540,7 @@ def main() -> None:
         write_json(output_dir / "production_cycles.json", [asdict(cycle) for cycle in cycles])
         write_json(output_dir / "annual_summary.json", asdict(annual))
         write_json(output_dir / "cash_flow.json", [asdict(row) for row in cashflows])
+        write_json(output_dir / "revenue_schedules.json", revenue_schedules)
 
     write_json(output_dir / "valuation.json", valuation)
 

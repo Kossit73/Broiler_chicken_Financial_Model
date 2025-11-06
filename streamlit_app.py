@@ -602,7 +602,13 @@ def main() -> None:
     payload["ai_settings"] = ai_settings
     st.session_state["ai_settings"] = ai_settings
 
-    snapshot = copy.deepcopy(payload)
+    input_page = copy.deepcopy(payload)
+    snapshot = st.session_state.get("input_snapshot")
+    if snapshot is None or st.session_state.get("snapshot_scenario") != selected_scenario:
+        snapshot = copy.deepcopy(input_page)
+        st.session_state.snapshot_scenario = selected_scenario
+    elif snapshot != input_page:
+        snapshot = copy.deepcopy(input_page)
     st.session_state.input_snapshot = snapshot
 
     model, results = _ensure_scenario_payload(selected_scenario, snapshot)

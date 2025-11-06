@@ -345,6 +345,108 @@ def _sanitize_key(label: str) -> str:
     return re.sub(r"[^0-9a-zA-Z_]+", "_", label.lower()).strip("_") or "schedule"
 
 
+def _row_label(df: pd.DataFrame, idx: int) -> str:
+    if "Period" in df.columns:
+        value = df.at[idx, "Period"]
+        if pd.notna(value) and str(value).strip():
+            return str(value)
+    return f"Row {idx + 1}"
+
+
+def _coerce_row_value(raw_value: Optional[str], series: pd.Series) -> Any:
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip()
+    if text == "":
+        return None
+
+    # Detect boolean-like inputs first
+    lowered = text.lower()
+    if lowered in {"true", "false", "yes", "no", "y", "n", "1", "0"}:
+        if lowered in {"true", "yes", "y", "1"}:
+            return True
+        if lowered in {"false", "no", "n", "0"}:
+            return False
+
+    numeric_series = pd.to_numeric(series, errors="coerce")
+    if numeric_series.notna().sum() > 0:
+        parsed = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
+        if pd.notna(parsed):
+            if numeric_series.dropna().apply(lambda v: float(v).is_integer()).all():
+                return int(round(float(parsed)))
+            return float(parsed)
+
+    return raw_value
+
+
+def _render_row_editors(
+    df: pd.DataFrame,
+    *,
+    original_columns: List[str],
+    fixed_columns: Dict[str, Any],
+    key_prefix: str,
+) -> Tuple[pd.DataFrame, bool]:
+    """Render per-row edit forms and return the updated DataFrame."""
+
+    if df.empty:
+        return df, False
+
+    updated_df = df.copy()
+    changed = False
+
+    st.markdown("##### Edit rows")
+    for idx in updated_df.index:
+        label = _row_label(updated_df, idx)
+        with st.expander(f"Edit {label}"):
+            form_key = f"form_{key_prefix}_{idx}"
+            with st.form(form_key):
+                pending_updates: Dict[str, Tuple[str, str]] = {}
+                for column in original_columns:
+                    current_value = updated_df.at[idx, column] if column in updated_df.columns else None
+                    display_value = "" if pd.isna(current_value) else str(current_value)
+                    widget_key = f"{form_key}_{column}"
+                    if column in fixed_columns:
+                        st.text_input(
+                            column,
+                            value=display_value,
+                            disabled=True,
+                            key=widget_key,
+                        )
+                        continue
+                    new_value = st.text_input(
+                        column,
+                        value=display_value,
+                        key=widget_key,
+                    )
+                    pending_updates[column] = (widget_key, new_value)
+
+                submitted = st.form_submit_button("Save row")
+
+            if submitted:
+                for column, (widget_key, raw) in pending_updates.items():
+                    coerced = _coerce_row_value(
+                        raw,
+                        updated_df[column] if column in updated_df.columns else pd.Series(dtype="object"),
+                    )
+                    if column in updated_df.columns:
+                        updated_df.at[idx, column] = coerced
+                    display = ""
+                    if coerced is None:
+                        display = ""
+                    elif isinstance(coerced, float) and pd.isna(coerced):
+                        display = ""
+                    else:
+                        display = str(coerced)
+                    st.session_state[widget_key] = display
+                for column, value in fixed_columns.items():
+                    if column in updated_df.columns:
+                        updated_df.at[idx, column] = value
+                changed = True
+                st.success(f"Saved changes for {label}.")
+
+    return updated_df, changed
+
+
 def _render_schedule_editor(
     title: str,
     schedule_key: str,
@@ -476,6 +578,19 @@ def _render_schedule_editor(
     if auto_update_revenue:
         edited_df = _auto_compute_revenue(edited_df)
     edited_df = _ensure_fixed_columns(edited_df, fixed_columns)
+
+    if edit_enabled:
+        editor_key_prefix = f"{namespace}_{schedule_key}_{scenario}"
+        edited_df, row_changed = _render_row_editors(
+            edited_df,
+            original_columns=original_columns,
+            fixed_columns=fixed_columns,
+            key_prefix=editor_key_prefix,
+        )
+        if row_changed and auto_update_revenue:
+            edited_df = _auto_compute_revenue(edited_df)
+            edited_df = _ensure_fixed_columns(edited_df, fixed_columns)
+
     state["data"] = edited_df.replace({pd.NA: None}).to_dict("records")
     return edited_df.reindex(columns=original_columns, fill_value=None)
 def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = None) -> None:

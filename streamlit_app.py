@@ -319,22 +319,22 @@ def main() -> None:
     col2.metric("IRR", f"{valuation['irr']:.2%}")
     col3.metric("Discount rate", f"{valuation['discount_rate']:.2%}")
 
-    st.subheader("Assumptions summary")
-    for schedule_name, group in assumption_schedule_df.groupby("schedule", sort=False):
-        st.markdown(f"**{schedule_name}**")
-        st.dataframe(
-            group.drop(columns=["schedule"]),
-            use_container_width=True,
-            hide_index=True,
-        )
-    render_download_button("Download assumptions CSV", assumption_schedule_df, "assumptions_summary.csv")
-
     cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])
     annual_df = pd.DataFrame([asdict(results["annual"])])
     cashflow_df = pd.DataFrame([asdict(row) for row in results["cashflows"]])
 
     tab1, tab2, tab3 = st.tabs(["Production cycles", "Annual summary", "Cash flows"])
     with tab1:
+        st.subheader("Assumptions summary")
+        for schedule_name, group in assumption_schedule_df.groupby("schedule", sort=False):
+            st.markdown(f"**{schedule_name}**")
+            st.dataframe(
+                group.drop(columns=["schedule"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+        render_download_button("Download assumptions CSV", assumption_schedule_df, "assumptions_summary.csv")
+        st.markdown("---")
         st.dataframe(cycles_df, use_container_width=True)
         render_download_button("Download cycles CSV", cycles_df, "production_cycles.csv")
     with tab2:

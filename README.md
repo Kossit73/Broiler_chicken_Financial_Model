@@ -11,6 +11,8 @@ interactively explore the assumptions and outputs.
 
 - `deployable_financial_model.py` – CLI that generates the model outputs.
 - `streamlit_app.py` – Streamlit UI that wraps the same model logic.
+- `revenue_schedules_builder.py` – optional Excel helper that extracts or
+  templates detailed revenue schedules by category.
 - `outputs/` *(created when you run the CLI)* – contains CSV/JSON tables,
   valuation summary, and a manifest of generated files.
 
@@ -56,3 +58,31 @@ The dashboard organises the inputs into horizontal tabs that mirror the CLI
 assumption schedule. As you tweak values, the NPV/IRR metrics and detailed
 tables refresh instantly. Download buttons are available on each tab, including
 the assumptions summary, if you want to export the tables as CSV files.
+
+## Revenue schedules helper (optional)
+
+If you maintain a separate Excel-based poultry model, you can generate
+category-by-category revenue schedules using the included
+`revenue_schedules_builder.py` script. The helper requires a few lightweight
+packages:
+
+```bash
+pip install pandas numpy openpyxl
+```
+
+Run the builder against your workbook and choose an output path for the
+generated schedules workbook:
+
+```bash
+python revenue_schedules_builder.py \
+  --input /path/to/source_model.xlsx \
+  --output /path/to/revenue_schedules.xlsx
+```
+
+The resulting Excel file contains:
+
+- One sheet per revenue category (broiler meat, eggs, manure, live birds, and
+  by-products) either populated from detected columns or ready-to-fill
+  templates if no data exists.
+- An "All Revenues (Detail)" consolidation tab.
+- Summary sheets for totals by period and by category.

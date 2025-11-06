@@ -509,10 +509,13 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
         _rerun()
 
 
-def assumptions_form(defaults: Assumptions) -> Assumptions:
+def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumptions:
     st.header("Model assumptions")
 
     farm_name = st.text_input("Farm name", defaults.farm_name)
+
+    ai_container = st.expander("AI & Machine Learning Settings", expanded=False)
+    _render_ai_settings(payload, ai_container)
 
     st.subheader("Input Landing Page")
 
@@ -804,7 +807,7 @@ def main() -> None:
     )
 
     with input_tab:
-        assumptions = assumptions_form(defaults)
+        assumptions = assumptions_form(defaults, payload)
 
     payload["assumptions"] = asdict(assumptions)
 
@@ -970,9 +973,6 @@ def main() -> None:
                 ["revenue", "ebitda", "net_income", "free_cash_flow"]
             ]
             st.line_chart(trend_chart)
-
-        ai_expander = st.expander("AI & Machine Learning Settings")
-        _render_ai_settings(payload, ai_expander)
 
     st.session_state.input_snapshot = copy.deepcopy(payload)
     scenario_store[selected_scenario] = payload

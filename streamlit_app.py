@@ -65,11 +65,13 @@ def _generate_excel_bytes(
 
     buffer = BytesIO()
     try:
-        writer = pd.ExcelWriter(buffer, engine="xlsxwriter")
-    except ValueError:
-        writer = pd.ExcelWriter(buffer, engine="openpyxl")
+        import xlsxwriter  # type: ignore  # noqa: F401
 
-    with writer:
+        engine = "xlsxwriter"
+    except ImportError:
+        engine = "openpyxl"
+
+    with pd.ExcelWriter(buffer, engine=engine) as writer:
         assumptions_df = pd.DataFrame(results["assumptions_schedule"])
         assumptions_df.to_excel(writer, sheet_name="Assumptions", index=False)
 
@@ -127,13 +129,19 @@ def _generate_excel_bytes(
         pd.DataFrame([ai_settings]).to_excel(writer, sheet_name="AI Settings", index=False)
 
         workbook = writer.book
-        workbook.set_properties(
-            {
-                "title": f"Broiler Model - {scenario}",
-                "subject": "Broiler chicken financial model",
-                "comments": "Generated via Streamlit dashboard",
-            }
-        )
+        if engine == "xlsxwriter":
+            workbook.set_properties(
+                {
+                    "title": f"Broiler Model - {scenario}",
+                    "subject": "Broiler chicken financial model",
+                    "comments": "Generated via Streamlit dashboard",
+                }
+            )
+        else:
+            props = workbook.properties
+            props.title = f"Broiler Model - {scenario}"
+            props.subject = "Broiler chicken financial model"
+            props.comments = "Generated via Streamlit dashboard"
 
     buffer.seek(0)
     return buffer.getvalue()

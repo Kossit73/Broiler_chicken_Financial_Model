@@ -70,8 +70,10 @@ streamlit run streamlit_app.py
 
 The dashboard now presents all inputs on a single **Input Landing Page** that
 groups controls into Production, Pricing, Costs, and Capital & financing
-sections. As you tweak values, the NPV/IRR metrics and detailed tables refresh
-instantly. Below the metrics you will find three workspaces:
+sections. A scenario selector at the top lets you maintain alternative
+assumption sets (Baseline, Expansion, Downside) without losing previous
+configurations. As you tweak values, the NPV/IRR metrics and detailed tables
+refresh instantly. Below the metrics you will find three workspaces:
 
 1. **Production & revenues** – retains the assumptions summary (grouped into the
    four schedules), detailed revenue schedules, production cycle results, annual
@@ -83,8 +85,15 @@ instantly. Below the metrics you will find three workspaces:
    line charts for DSCR and long-range revenue/EBITDA/net-income/free-cash-flow
    trends.
 
-Download buttons appear on every table so you can export the current view as
-CSV files without rerunning the CLI.
+Each workspace includes CSV download buttons keyed to the active scenario so
+you can export the current view without rerunning the CLI. The Production &
+revenues tab also exposes an **Excel export** card—click *Prepare Excel Model*
+to generate a multi-sheet workbook and download it directly from the browser.
+
+Open the **AI & Machine Learning Settings** expander in the Advanced analytics
+tab to configure optional forecasting and narrative preferences. The settings
+panel stores values per scenario and supports multiple providers, model names,
+and narrative focus areas.
 
 ## Revenue schedules helper (optional)
 

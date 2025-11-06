@@ -26,7 +26,9 @@ python deployable_financial_model.py --out outputs --formats csv json
 
 The command creates the `outputs/` directory (if needed) and writes:
 
-- `assumptions.(csv|json)` – input assumptions used by the model.
+- `assumptions_summary.(csv|json)` – schedule-style table grouped by category
+  for every model assumption.
+- `assumptions.(csv|json)` – raw key/value assumptions used by the model.
 - `production_cycles.(csv|json)` – production and cost metrics for each flock
   cycle within a year.
 - `annual_summary.(csv|json)` – aggregated annual revenue, cost, and EBITDA
@@ -50,6 +52,7 @@ pip install streamlit pandas
 streamlit run streamlit_app.py
 ```
 
-The dashboard exposes all key assumptions in the sidebar. As you tweak values,
-the NPV/IRR metrics and detailed tables refresh instantly. Download buttons are
-available on each tab if you want to export the tables as CSV files.
+The dashboard organises the inputs into horizontal tabs that mirror the CLI
+assumption schedule. As you tweak values, the NPV/IRR metrics and detailed
+tables refresh instantly. Download buttons are available on each tab, including
+the assumptions summary, if you want to export the tables as CSV files.

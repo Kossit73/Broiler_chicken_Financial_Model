@@ -312,6 +312,7 @@ def main() -> None:
 
     results = generate_model_outputs(assumptions)
     valuation = results["valuation"]
+    assumption_schedule_df = pd.DataFrame(results["assumptions_schedule"])
 
     col1, col2, col3 = st.columns(3)
     col1.metric("NPV", f"${valuation['npv']:,.0f}")
@@ -319,7 +320,8 @@ def main() -> None:
     col3.metric("Discount rate", f"{valuation['discount_rate']:.2%}")
 
     st.subheader("Assumptions summary")
-    st.json(asdict(assumptions))
+    st.dataframe(assumption_schedule_df, use_container_width=True, hide_index=True)
+    render_download_button("Download assumptions CSV", assumption_schedule_df, "assumptions_summary.csv")
 
     cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])
     annual_df = pd.DataFrame([asdict(results["annual"])])

@@ -52,6 +52,41 @@ class Assumptions:
     maintenance_capex_annual: float = 25000.0
 
 
+ASSUMPTION_SCHEDULE_LAYOUT = [
+    ("Farm profile", "Farm name", "farm_name"),
+    ("Production", "Cycles per year", "cycles_per_year"),
+    ("Production", "Birds placed per cycle", "birds_per_cycle"),
+    ("Production", "Mortality rate", "mortality_rate"),
+    ("Production", "Final weight (kg)", "final_weight_kg"),
+    ("Pricing", "Live price per kg", "live_price_per_kg"),
+    ("Pricing", "Annual price growth", "price_growth"),
+    ("Feed & animal health", "Feed conversion ratio", "feed_conversion_ratio"),
+    ("Feed & animal health", "Feed cost per kg", "feed_cost_per_kg"),
+    ("Feed & animal health", "Chick cost", "chick_cost"),
+    ("Feed & animal health", "Processing cost per bird", "processing_cost_per_bird"),
+    ("Feed & animal health", "Vaccination cost per bird", "vaccination_cost_per_bird"),
+    ("Operating costs", "Litter & disposal per cycle", "litter_disposal_per_cycle"),
+    ("Operating costs", "Propane per cycle", "propane_per_cycle"),
+    ("Operating costs", "Electricity per cycle", "electricity_per_cycle"),
+    ("Operating costs", "Labor per cycle", "labor_per_cycle"),
+    ("Operating costs", "Maintenance per cycle", "maintenance_per_cycle"),
+    ("Operating costs", "Management fee per cycle", "management_fee_per_cycle"),
+    ("Operating costs", "Insurance per cycle", "insurance_per_cycle"),
+    ("Operating costs", "Overhead per cycle", "overhead_per_cycle"),
+    ("Capital structure", "Housing capex", "capex_housing"),
+    ("Capital structure", "Equipment capex", "capex_equipment"),
+    ("Capital structure", "Working capital", "working_capital"),
+    ("Capital structure", "Maintenance capex (annual)", "maintenance_capex_annual"),
+    ("Capital structure", "Depreciation years", "depreciation_years"),
+    ("Financing", "Debt ratio", "debt_ratio"),
+    ("Financing", "Debt interest rate", "debt_interest_rate"),
+    ("Financing", "Debt term (years)", "debt_term_years"),
+    ("Financing", "Discount rate", "discount_rate"),
+    ("Financing", "Cost inflation", "cost_inflation"),
+    ("Financing", "Tax rate", "tax_rate"),
+]
+
+
 @dataclass
 class CycleResults:
     cycle: int
@@ -171,6 +206,20 @@ def compute_cycle(assumptions: Assumptions, cycle_number: int) -> CycleResults:
         gross_margin=gross_margin,
         ebitda=ebitda,
     )
+
+
+def build_assumptions_schedule(assumptions: Assumptions) -> List[Dict[str, Any]]:
+    """Return a tabular schedule summarising model assumptions."""
+
+    raw = asdict(assumptions)
+    schedule: List[Dict[str, Any]] = []
+    for category, label, key in ASSUMPTION_SCHEDULE_LAYOUT:
+        schedule.append({
+            "category": category,
+            "item": label,
+            "value": raw.get(key),
+        })
+    return schedule
 
 
 def compute_cycles(assumptions: Assumptions) -> List[CycleResults]:
@@ -367,6 +416,7 @@ def write_json(path: Path, data):
 def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
     """Run the financial model and return structured outputs."""
 
+    assumption_schedule = build_assumptions_schedule(assumptions)
     cycles = compute_cycles(assumptions)
     annual = annual_summary(assumptions, cycles)
     cashflows = discounted_cash_flow(assumptions, annual)
@@ -386,6 +436,7 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
 
     return {
         "assumptions": assumptions,
+        "assumptions_schedule": assumption_schedule,
         "cycles": cycles,
         "annual": annual,
         "cashflows": cashflows,
@@ -404,12 +455,14 @@ def main() -> None:
 
     results = generate_model_outputs(Assumptions())
     assumptions = results["assumptions"]
+    assumption_schedule = results["assumptions_schedule"]
     cycles = results["cycles"]
     annual = results["annual"]
     cashflows = results["cashflows"]
     valuation = results["valuation"]
 
     if "csv" in args.formats:
+        write_csv(output_dir / "assumptions_summary.csv", assumption_schedule)
         write_csv(output_dir / "assumptions.csv", [{"name": k, "value": v} for k, v in asdict(assumptions).items()])
         write_csv(output_dir / "production_cycles.csv", [asdict(cycle) for cycle in cycles])
         write_csv(output_dir / "annual_summary.csv", [asdict(annual)])
@@ -417,6 +470,7 @@ def main() -> None:
 
     if "json" in args.formats:
         write_json(output_dir / "assumptions.json", asdict(assumptions))
+        write_json(output_dir / "assumptions_summary.json", assumption_schedule)
         write_json(output_dir / "production_cycles.json", [asdict(cycle) for cycle in cycles])
         write_json(output_dir / "annual_summary.json", asdict(annual))
         write_json(output_dir / "cash_flow.json", [asdict(row) for row in cashflows])

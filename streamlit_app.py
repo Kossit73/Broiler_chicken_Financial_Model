@@ -37,48 +37,235 @@ def render_download_button(label: str, dataframe: pd.DataFrame, file_name: str):
 
 
 def assumptions_form(defaults: Assumptions) -> Assumptions:
-    st.sidebar.header("Model assumptions")
+    st.header("Model assumptions")
 
-    farm_name = st.sidebar.text_input("Farm name", defaults.farm_name)
+    farm_name = st.text_input("Farm name", defaults.farm_name)
 
-    with st.sidebar.expander("Production", expanded=True):
-        cycles_per_year = st.number_input("Cycles per year", min_value=1, max_value=12, value=defaults.cycles_per_year)
-        birds_per_cycle = st.number_input("Birds per cycle", min_value=1000, max_value=100000, value=defaults.birds_per_cycle, step=1000)
-        mortality_rate = st.number_input("Mortality rate", min_value=0.0, max_value=0.2, value=defaults.mortality_rate, step=0.005, format="%.3f")
-        final_weight_kg = st.number_input("Final weight (kg)", min_value=1.0, max_value=4.0, value=defaults.final_weight_kg, step=0.1)
+    production_tab, pricing_tab, costs_tab, capital_tab = st.tabs(
+        ["Production", "Pricing", "Costs", "Capital & financing"]
+    )
 
-    with st.sidebar.expander("Pricing", expanded=True):
-        live_price_per_kg = st.number_input("Live price per kg", min_value=0.5, max_value=5.0, value=defaults.live_price_per_kg, step=0.05)
-        price_growth = st.number_input("Annual price growth", min_value=-0.05, max_value=0.1, value=defaults.price_growth, step=0.005, format="%.3f")
+    with production_tab:
+        col_a, col_b = st.columns(2)
+        cycles_per_year = col_a.number_input(
+            "Cycles per year", min_value=1, max_value=12, value=defaults.cycles_per_year
+        )
+        birds_per_cycle = col_b.number_input(
+            "Birds per cycle",
+            min_value=1000,
+            max_value=100000,
+            value=defaults.birds_per_cycle,
+            step=1000,
+        )
+        mortality_rate = col_a.number_input(
+            "Mortality rate",
+            min_value=0.0,
+            max_value=0.2,
+            value=defaults.mortality_rate,
+            step=0.005,
+            format="%.3f",
+        )
+        final_weight_kg = col_b.number_input(
+            "Final weight (kg)",
+            min_value=1.0,
+            max_value=4.0,
+            value=defaults.final_weight_kg,
+            step=0.1,
+        )
 
-    with st.sidebar.expander("Costs", expanded=False):
-        feed_conversion_ratio = st.number_input("Feed conversion ratio", min_value=1.0, max_value=2.5, value=defaults.feed_conversion_ratio, step=0.05)
-        feed_cost_per_kg = st.number_input("Feed cost per kg", min_value=0.2, max_value=1.0, value=defaults.feed_cost_per_kg, step=0.01)
-        chick_cost = st.number_input("Chick cost", min_value=0.3, max_value=2.0, value=defaults.chick_cost, step=0.05)
-        processing_cost_per_bird = st.number_input("Processing cost per bird", min_value=0.05, max_value=1.0, value=defaults.processing_cost_per_bird, step=0.05)
-        vaccination_cost_per_bird = st.number_input("Vaccination cost per bird", min_value=0.0, max_value=0.5, value=defaults.vaccination_cost_per_bird, step=0.01)
-        litter_disposal_per_cycle = st.number_input("Litter & disposal per cycle", min_value=0.0, max_value=10000.0, value=defaults.litter_disposal_per_cycle, step=100.0)
-        propane_per_cycle = st.number_input("Propane per cycle", min_value=0.0, max_value=20000.0, value=defaults.propane_per_cycle, step=100.0)
-        electricity_per_cycle = st.number_input("Electricity per cycle", min_value=0.0, max_value=10000.0, value=defaults.electricity_per_cycle, step=100.0)
-        labor_per_cycle = st.number_input("Labor per cycle", min_value=0.0, max_value=50000.0, value=defaults.labor_per_cycle, step=500.0)
-        maintenance_per_cycle = st.number_input("Maintenance per cycle", min_value=0.0, max_value=10000.0, value=defaults.maintenance_per_cycle, step=100.0)
-        management_fee_per_cycle = st.number_input("Management fee per cycle", min_value=0.0, max_value=10000.0, value=defaults.management_fee_per_cycle, step=100.0)
-        insurance_per_cycle = st.number_input("Insurance per cycle", min_value=0.0, max_value=10000.0, value=defaults.insurance_per_cycle, step=100.0)
-        overhead_per_cycle = st.number_input("Overhead per cycle", min_value=0.0, max_value=10000.0, value=defaults.overhead_per_cycle, step=100.0)
-        cost_inflation = st.number_input("Cost inflation", min_value=-0.05, max_value=0.1, value=defaults.cost_inflation, step=0.005, format="%.3f")
+    with pricing_tab:
+        col_a, col_b = st.columns(2)
+        live_price_per_kg = col_a.number_input(
+            "Live price per kg",
+            min_value=0.5,
+            max_value=5.0,
+            value=defaults.live_price_per_kg,
+            step=0.05,
+        )
+        price_growth = col_b.number_input(
+            "Annual price growth",
+            min_value=-0.05,
+            max_value=0.1,
+            value=defaults.price_growth,
+            step=0.005,
+            format="%.3f",
+        )
 
-    with st.sidebar.expander("Capital & financing", expanded=False):
-        capex_housing = st.number_input("Housing capex", min_value=0.0, max_value=5000000.0, value=defaults.capex_housing, step=10000.0)
-        capex_equipment = st.number_input("Equipment capex", min_value=0.0, max_value=2000000.0, value=defaults.capex_equipment, step=5000.0)
-        working_capital = st.number_input("Working capital", min_value=0.0, max_value=1000000.0, value=defaults.working_capital, step=5000.0)
-        depreciation_years = st.number_input("Depreciation years", min_value=1, max_value=40, value=defaults.depreciation_years)
-        maintenance_capex_annual = st.number_input("Maintenance capex (annual)", min_value=0.0, max_value=200000.0, value=defaults.maintenance_capex_annual, step=5000.0)
+    with costs_tab:
+        col_a, col_b = st.columns(2)
+        feed_conversion_ratio = col_a.number_input(
+            "Feed conversion ratio",
+            min_value=1.0,
+            max_value=2.5,
+            value=defaults.feed_conversion_ratio,
+            step=0.05,
+        )
+        feed_cost_per_kg = col_b.number_input(
+            "Feed cost per kg",
+            min_value=0.2,
+            max_value=1.0,
+            value=defaults.feed_cost_per_kg,
+            step=0.01,
+        )
+        chick_cost = col_a.number_input(
+            "Chick cost",
+            min_value=0.3,
+            max_value=2.0,
+            value=defaults.chick_cost,
+            step=0.05,
+        )
+        processing_cost_per_bird = col_b.number_input(
+            "Processing cost per bird",
+            min_value=0.05,
+            max_value=1.0,
+            value=defaults.processing_cost_per_bird,
+            step=0.05,
+        )
+        vaccination_cost_per_bird = col_a.number_input(
+            "Vaccination cost per bird",
+            min_value=0.0,
+            max_value=0.5,
+            value=defaults.vaccination_cost_per_bird,
+            step=0.01,
+        )
+        litter_disposal_per_cycle = col_b.number_input(
+            "Litter & disposal per cycle",
+            min_value=0.0,
+            max_value=10000.0,
+            value=defaults.litter_disposal_per_cycle,
+            step=100.0,
+        )
+        propane_per_cycle = col_a.number_input(
+            "Propane per cycle",
+            min_value=0.0,
+            max_value=20000.0,
+            value=defaults.propane_per_cycle,
+            step=100.0,
+        )
+        electricity_per_cycle = col_b.number_input(
+            "Electricity per cycle",
+            min_value=0.0,
+            max_value=10000.0,
+            value=defaults.electricity_per_cycle,
+            step=100.0,
+        )
+        labor_per_cycle = col_a.number_input(
+            "Labor per cycle",
+            min_value=0.0,
+            max_value=50000.0,
+            value=defaults.labor_per_cycle,
+            step=500.0,
+        )
+        maintenance_per_cycle = col_b.number_input(
+            "Maintenance per cycle",
+            min_value=0.0,
+            max_value=10000.0,
+            value=defaults.maintenance_per_cycle,
+            step=100.0,
+        )
+        management_fee_per_cycle = col_a.number_input(
+            "Management fee per cycle",
+            min_value=0.0,
+            max_value=10000.0,
+            value=defaults.management_fee_per_cycle,
+            step=100.0,
+        )
+        insurance_per_cycle = col_b.number_input(
+            "Insurance per cycle",
+            min_value=0.0,
+            max_value=10000.0,
+            value=defaults.insurance_per_cycle,
+            step=100.0,
+        )
+        overhead_per_cycle = col_a.number_input(
+            "Overhead per cycle",
+            min_value=0.0,
+            max_value=10000.0,
+            value=defaults.overhead_per_cycle,
+            step=100.0,
+        )
+        cost_inflation = col_b.number_input(
+            "Cost inflation",
+            min_value=-0.05,
+            max_value=0.1,
+            value=defaults.cost_inflation,
+            step=0.005,
+            format="%.3f",
+        )
 
-        debt_ratio = st.number_input("Debt ratio", min_value=0.0, max_value=1.0, value=defaults.debt_ratio, step=0.05)
-        debt_interest_rate = st.number_input("Debt interest rate", min_value=0.0, max_value=0.2, value=defaults.debt_interest_rate, step=0.005, format="%.3f")
-        debt_term_years = st.number_input("Debt term (years)", min_value=1, max_value=30, value=defaults.debt_term_years)
-        discount_rate = st.number_input("Discount rate", min_value=0.0, max_value=0.5, value=defaults.discount_rate, step=0.01, format="%.3f")
-        tax_rate = st.number_input("Tax rate", min_value=0.0, max_value=0.5, value=defaults.tax_rate, step=0.01, format="%.3f")
+    with capital_tab:
+        col_a, col_b = st.columns(2)
+        capex_housing = col_a.number_input(
+            "Housing capex",
+            min_value=0.0,
+            max_value=5000000.0,
+            value=defaults.capex_housing,
+            step=10000.0,
+        )
+        capex_equipment = col_b.number_input(
+            "Equipment capex",
+            min_value=0.0,
+            max_value=2000000.0,
+            value=defaults.capex_equipment,
+            step=5000.0,
+        )
+        working_capital = col_a.number_input(
+            "Working capital",
+            min_value=0.0,
+            max_value=1000000.0,
+            value=defaults.working_capital,
+            step=5000.0,
+        )
+        depreciation_years = col_b.number_input(
+            "Depreciation years",
+            min_value=1,
+            max_value=40,
+            value=defaults.depreciation_years,
+        )
+        maintenance_capex_annual = col_a.number_input(
+            "Maintenance capex (annual)",
+            min_value=0.0,
+            max_value=200000.0,
+            value=defaults.maintenance_capex_annual,
+            step=5000.0,
+        )
+        debt_ratio = col_b.number_input(
+            "Debt ratio",
+            min_value=0.0,
+            max_value=1.0,
+            value=defaults.debt_ratio,
+            step=0.05,
+        )
+        debt_interest_rate = col_a.number_input(
+            "Debt interest rate",
+            min_value=0.0,
+            max_value=0.2,
+            value=defaults.debt_interest_rate,
+            step=0.005,
+            format="%.3f",
+        )
+        debt_term_years = col_b.number_input(
+            "Debt term (years)",
+            min_value=1,
+            max_value=30,
+            value=defaults.debt_term_years,
+        )
+        discount_rate = col_a.number_input(
+            "Discount rate",
+            min_value=0.0,
+            max_value=0.5,
+            value=defaults.discount_rate,
+            step=0.01,
+            format="%.3f",
+        )
+        tax_rate = col_b.number_input(
+            "Tax rate",
+            min_value=0.0,
+            max_value=0.5,
+            value=defaults.tax_rate,
+            step=0.01,
+            format="%.3f",
+        )
 
     return Assumptions(
         farm_name=farm_name,
@@ -150,7 +337,7 @@ def main() -> None:
         render_download_button("Download cash flow CSV", cashflow_df, "cash_flow.csv")
 
     st.markdown("---")
-    st.caption("Use the controls in the sidebar to adjust the operating model and financing structure.")
+    st.caption("Use the assumption tabs above to adjust the operating model and financing structure.")
 
 
 if __name__ == "__main__":

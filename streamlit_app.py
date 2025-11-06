@@ -312,6 +312,8 @@ def main() -> None:
     valuation = results["valuation"]
     assumption_schedule_df = pd.DataFrame(results["assumptions_schedule"])
     revenue_schedules = results["revenue_schedules"]
+    financials = results["financial_statements"]
+    advanced = results["advanced_analytics"]
 
     col1, col2, col3 = st.columns(3)
     col1.metric("NPV", f"${valuation['npv']:,.0f}")
@@ -321,9 +323,18 @@ def main() -> None:
     cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])
     annual_df = pd.DataFrame([asdict(results["annual"])])
     cashflow_df = pd.DataFrame([asdict(row) for row in results["cashflows"]])
+    income_df = pd.DataFrame([asdict(row) for row in financials["income_statement"]])
+    balance_df = pd.DataFrame([asdict(row) for row in financials["balance_sheet"]])
+    cash_statement_df = pd.DataFrame([asdict(row) for row in financials["cash_flow_statement"]])
+    loan_df = pd.DataFrame(financials["loan_schedule"])
+    metrics_df = pd.DataFrame(advanced["metrics"])
+    dscr_df = pd.DataFrame(advanced["dscr"])
+    trend_df = pd.DataFrame(advanced["trend"])
 
-    tab1, tab2, tab3 = st.tabs(["Production cycles", "Annual summary", "Cash flows"])
-    with tab1:
+    overview_tab, financials_tab, analytics_tab = st.tabs(
+        ["Production & revenues", "Financial statements", "Advanced analytics"]
+    )
+    with overview_tab:
         st.subheader("Assumptions summary")
         for schedule_name, group in assumption_schedule_df.groupby("schedule", sort=False):
             st.markdown(f"**{schedule_name}**")
@@ -333,6 +344,7 @@ def main() -> None:
                 hide_index=True,
             )
         render_download_button("Download assumptions CSV", assumption_schedule_df, "assumptions_summary.csv")
+
         st.subheader("Revenue schedules")
         for category, rows in revenue_schedules.items():
             st.markdown(f"**{category}**")
@@ -351,15 +363,59 @@ def main() -> None:
                 schedule_df,
                 f"{safe_name}_schedule.csv",
             )
-        st.markdown("---")
+
+        st.subheader("Production cycles")
         st.dataframe(cycles_df, use_container_width=True)
         render_download_button("Download cycles CSV", cycles_df, "production_cycles.csv")
-    with tab2:
+
+        st.subheader("Annual summary")
         st.dataframe(annual_df, use_container_width=True)
         render_download_button("Download annual CSV", annual_df, "annual_summary.csv")
-    with tab3:
+
+        st.subheader("Discounted cash flows")
         st.dataframe(cashflow_df, use_container_width=True)
         render_download_button("Download cash flow CSV", cashflow_df, "cash_flow.csv")
+
+    with financials_tab:
+        fin_tab1, fin_tab2, fin_tab3, fin_tab4 = st.tabs(
+            [
+                "Income statement",
+                "Balance sheet",
+                "Cash flow statement",
+                "Debt schedule",
+            ]
+        )
+        with fin_tab1:
+            st.dataframe(income_df, use_container_width=True, hide_index=True)
+            render_download_button("Download income statement CSV", income_df, "income_statement.csv")
+        with fin_tab2:
+            st.dataframe(balance_df, use_container_width=True, hide_index=True)
+            render_download_button("Download balance sheet CSV", balance_df, "balance_sheet.csv")
+        with fin_tab3:
+            st.dataframe(cash_statement_df, use_container_width=True, hide_index=True)
+            render_download_button("Download cash flow statement CSV", cash_statement_df, "cash_flow_statement.csv")
+        with fin_tab4:
+            st.dataframe(loan_df, use_container_width=True, hide_index=True)
+            render_download_button("Download debt schedule CSV", loan_df, "loan_schedule.csv")
+
+    with analytics_tab:
+        st.subheader("Advanced metrics")
+        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+        render_download_button("Download metrics CSV", metrics_df, "advanced_metrics.csv")
+
+        if not dscr_df.empty:
+            st.subheader("Debt service coverage ratio")
+            dscr_chart = dscr_df.set_index("year")
+            st.line_chart(dscr_chart)
+            render_download_button("Download DSCR CSV", dscr_df, "dscr_summary.csv")
+
+        if not trend_df.empty:
+            st.subheader("Performance trends")
+            trend_chart = trend_df.set_index("year")[
+                ["revenue", "ebitda", "net_income", "free_cash_flow"]
+            ]
+            st.line_chart(trend_chart)
+            render_download_button("Download trend CSV", trend_df, "trend_analysis.csv")
 
     st.markdown("---")
     st.caption("Use the Input Landing Page above to adjust the operating model and financing structure.")

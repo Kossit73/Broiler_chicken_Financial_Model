@@ -36,8 +36,18 @@ The command creates the `outputs/` directory (if needed) and writes:
   cycle within a year.
 - `annual_summary.(csv|json)` – aggregated annual revenue, cost, and EBITDA
   metrics.
-- `cash_flow.(csv|json)` – 10-year cash flow statement with operating cash flow,
-  maintenance capex, debt service, and discounted values.
+- `cash_flow.(csv|json)` – 10-year cash flow projections with operating cash
+  flow, maintenance capex, debt service, and discounted values.
+- `income_statement.(csv|json)` – modeled 10-year income statement with revenue,
+  COGS, EBITDA, taxes, and net income.
+- `balance_sheet.(csv|json)` – simplified balance sheet highlighting cash,
+  working capital, net PP&E, debt, and equity movements.
+- `cash_flow_statement.(csv|json)` – three-section cash flow statement (operating,
+  investing, financing) plus ending cash balances.
+- `loan_schedule.(csv|json)` – annual amortization table for the project debt.
+- `advanced_metrics.csv`, `dscr_summary.csv`, `trend_analysis.csv` (and
+  consolidated `advanced_analytics.json`) – KPI pack covering DSCR, payback, and
+  performance trend data points used in the dashboard analytics views.
 - Revenue schedule CSVs for each category (`broiler_revenue_schedule.csv`,
   `eggs_revenue_schedule.csv`, etc.) plus `revenue_schedules.json` capturing all
   five categories in one structure for downstream tooling.
@@ -61,10 +71,20 @@ streamlit run streamlit_app.py
 The dashboard now presents all inputs on a single **Input Landing Page** that
 groups controls into Production, Pricing, Costs, and Capital & financing
 sections. As you tweak values, the NPV/IRR metrics and detailed tables refresh
-instantly. The Production tab continues to house the four-part assumptions
-summary as well as dedicated revenue schedules for broilers, eggs, manure, live
-birds, and by-products. Download buttons on each table let you export the
-current view as CSV files.
+instantly. Below the metrics you will find three workspaces:
+
+1. **Production & revenues** – retains the assumptions summary (grouped into the
+   four schedules), detailed revenue schedules, production cycle results, annual
+   summary, and discounted cash flows.
+2. **Financial statements** – exposes the modeled income statement, balance
+   sheet, cash flow statement, and debt amortization tables with download
+   buttons for each.
+3. **Advanced analytics** – surfaces KPIs (average margins, DSCR, payback) and
+   line charts for DSCR and long-range revenue/EBITDA/net-income/free-cash-flow
+   trends.
+
+Download buttons appear on every table so you can export the current view as
+CSV files without rerunning the CLI.
 
 ## Revenue schedules helper (optional)
 

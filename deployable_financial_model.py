@@ -14,7 +14,7 @@ import csv
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 
 @dataclass
@@ -134,17 +134,63 @@ class AnnualSummary:
 class CashFlowRow:
     year: int
     revenue: float
+    variable_costs: float
+    fixed_costs: float
     operating_expense: float
     ebitda: float
     depreciation: float
     interest_expense: float
     taxes: float
+    net_income: float
     operating_cash_flow: float
     maintenance_capex: float
     debt_service: float
+    principal_payment: float
     free_cash_flow: float
     discount_factor: float
     present_value: float
+    ending_debt: float
+    cumulative_cash: float
+
+
+@dataclass
+class IncomeStatementRow:
+    year: int
+    revenue: float
+    cogs: float
+    gross_profit: float
+    operating_expenses: float
+    ebitda: float
+    depreciation: float
+    ebit: float
+    interest: float
+    taxes: float
+    net_income: float
+    ebitda_margin: float
+    net_margin: float
+
+
+@dataclass
+class BalanceSheetRow:
+    year: int
+    cash: float
+    working_capital: float
+    net_ppe: float
+    total_assets: float
+    debt: float
+    equity: float
+    retained_earnings: float
+    debt_to_equity: float | None
+
+
+@dataclass
+class CashFlowStatementRow:
+    year: int
+    operating_cash_flow: float
+    investing_cash_flow: float
+    financing_cash_flow: float
+    net_change_in_cash: float
+    ending_cash: float
 
 
 def amortization_schedule(principal: float, rate: float, term_years: int) -> List[Dict[str, float]]:
@@ -323,7 +369,9 @@ def annual_summary(assumptions: Assumptions, cycles: Iterable[CycleResults]) -> 
     )
 
 
-def discounted_cash_flow(assumptions: Assumptions, base_annual: AnnualSummary) -> List[CashFlowRow]:
+def discounted_cash_flow(
+    assumptions: Assumptions, base_annual: AnnualSummary
+) -> Tuple[List[CashFlowRow], List[Dict[str, float]]]:
     total_capex = assumptions.capex_housing + assumptions.capex_equipment
     equity = total_capex * (1 - assumptions.debt_ratio)
     debt = total_capex * assumptions.debt_ratio
@@ -332,25 +380,30 @@ def discounted_cash_flow(assumptions: Assumptions, base_annual: AnnualSummary) -
     rows: List[CashFlowRow] = []
     depreciation = base_annual.depreciation
     revenue = base_annual.revenue
-    operating_expense = base_annual.total_cost - base_annual.ebitda  # fixed portion already in EBITDA
-
     # Year 0 initial investment
     upfront_cash = -(equity + assumptions.working_capital)
+    cumulative_cash = upfront_cash
     rows.append(
         CashFlowRow(
             year=0,
             revenue=0.0,
+            variable_costs=0.0,
+            fixed_costs=0.0,
             operating_expense=0.0,
             ebitda=0.0,
             depreciation=0.0,
             interest_expense=0.0,
             taxes=0.0,
+            net_income=0.0,
             operating_cash_flow=upfront_cash,
             maintenance_capex=0.0,
             debt_service=0.0,
+            principal_payment=0.0,
             free_cash_flow=upfront_cash,
             discount_factor=1.0,
             present_value=upfront_cash,
+            ending_debt=debt,
+            cumulative_cash=cumulative_cash,
         )
     )
 
@@ -371,14 +424,19 @@ def discounted_cash_flow(assumptions: Assumptions, base_annual: AnnualSummary) -
         ebitda = revenue - variable_costs - fixed_costs
         interest_expense = 0.0
         debt_service = 0.0
+        principal_payment = 0.0
+        ending_balance = 0.0
         if year <= len(loan_schedule):
             sched = loan_schedule[year - 1]
             interest_expense = sched["interest"]
             debt_service = sched["payment"]
+            principal_payment = sched["principal"]
+            ending_balance = sched["balance"]
 
-        ebit = ebitda - depreciation - interest_expense
-        taxable_income = max(0.0, ebit)
+        ebit = ebitda - depreciation
+        taxable_income = max(0.0, ebit - interest_expense)
         taxes = taxable_income * assumptions.tax_rate
+        net_income = ebit - interest_expense - taxes
         operating_cash_flow = ebitda - taxes
         free_cash_flow = (
             operating_cash_flow
@@ -387,26 +445,214 @@ def discounted_cash_flow(assumptions: Assumptions, base_annual: AnnualSummary) -
         )
         discount_factor = (1 + assumptions.discount_rate) ** year
         present_value = free_cash_flow / discount_factor
+        cumulative_cash += free_cash_flow
 
         rows.append(
             CashFlowRow(
                 year=year,
                 revenue=revenue,
+                variable_costs=variable_costs,
+                fixed_costs=fixed_costs,
                 operating_expense=variable_costs + fixed_costs,
                 ebitda=ebitda,
                 depreciation=depreciation,
                 interest_expense=interest_expense,
                 taxes=taxes,
+                net_income=net_income,
                 operating_cash_flow=operating_cash_flow,
                 maintenance_capex=assumptions.maintenance_capex_annual,
                 debt_service=debt_service,
+                principal_payment=principal_payment,
                 free_cash_flow=free_cash_flow,
                 discount_factor=discount_factor,
                 present_value=present_value,
+                ending_debt=ending_balance,
+                cumulative_cash=cumulative_cash,
             )
         )
 
-    return rows
+    return rows, loan_schedule
+
+
+def build_financial_statements(
+    assumptions: Assumptions,
+    cashflows: List[CashFlowRow],
+    loan_schedule: List[Dict[str, float]],
+) -> Dict[str, List[Any]]:
+    total_capex = assumptions.capex_housing + assumptions.capex_equipment
+    depreciation = (assumptions.capex_housing + assumptions.capex_equipment) / assumptions.depreciation_years
+    equity_base = total_capex * (1 - assumptions.debt_ratio)
+    equity_total = equity_base + assumptions.working_capital
+
+    income_rows: List[IncomeStatementRow] = []
+    cash_statement: List[CashFlowStatementRow] = []
+    balance_rows: List[BalanceSheetRow] = []
+
+    # Cash flow statement year 0 (construction / funding)
+    investing_cash = -(total_capex + assumptions.working_capital)
+    financing_cash = equity_total + (total_capex * assumptions.debt_ratio)
+    net_change = investing_cash + financing_cash
+    cash_balance = net_change
+    cash_statement.append(
+        CashFlowStatementRow(
+            year=0,
+            operating_cash_flow=0.0,
+            investing_cash_flow=investing_cash,
+            financing_cash_flow=financing_cash,
+            net_change_in_cash=net_change,
+            ending_cash=cash_balance,
+        )
+    )
+
+    for row in cashflows:
+        if row.year == 0:
+            balance_rows.append(
+                BalanceSheetRow(
+                    year=0,
+                    cash=cash_balance,
+                    working_capital=assumptions.working_capital,
+                    net_ppe=total_capex,
+                    total_assets=total_capex + assumptions.working_capital + cash_balance,
+                    debt=total_capex * assumptions.debt_ratio,
+                    equity=equity_total + cash_balance,
+                    retained_earnings=0.0,
+                    debt_to_equity=(total_capex * assumptions.debt_ratio) / equity_total if equity_total else None,
+                )
+            )
+            continue
+
+        # Income statement
+        gross_profit = row.revenue - row.variable_costs
+        ebit = row.ebitda - row.depreciation
+        income_rows.append(
+            IncomeStatementRow(
+                year=row.year,
+                revenue=row.revenue,
+                cogs=row.variable_costs,
+                gross_profit=gross_profit,
+                operating_expenses=row.fixed_costs,
+                ebitda=row.ebitda,
+                depreciation=row.depreciation,
+                ebit=ebit,
+                interest=row.interest_expense,
+                taxes=row.taxes,
+                net_income=row.net_income,
+                ebitda_margin=(row.ebitda / row.revenue) if row.revenue else 0.0,
+                net_margin=(row.net_income / row.revenue) if row.revenue else 0.0,
+            )
+        )
+
+        # Cash flow statement (operating/investing/financing for the year)
+        operating_cash = row.net_income + row.depreciation
+        investing_cash = -assumptions.maintenance_capex_annual
+        financing_cash = -row.principal_payment
+        net_change = operating_cash + investing_cash + financing_cash
+        cash_balance += net_change
+        cash_statement.append(
+            CashFlowStatementRow(
+                year=row.year,
+                operating_cash_flow=operating_cash,
+                investing_cash_flow=investing_cash,
+                financing_cash_flow=financing_cash,
+                net_change_in_cash=net_change,
+                ending_cash=cash_balance,
+            )
+        )
+
+        # Balance sheet
+        accum_dep = min(row.year, assumptions.depreciation_years) * depreciation
+        net_ppe = max(0.0, total_capex - accum_dep)
+        debt_balance = row.ending_debt if row.ending_debt else 0.0
+        total_assets = cash_balance + assumptions.working_capital + net_ppe
+        equity = total_assets - debt_balance
+        retained = equity - equity_total
+        debt_to_equity = (debt_balance / equity) if equity else None
+        balance_rows.append(
+            BalanceSheetRow(
+                year=row.year,
+                cash=cash_balance,
+                working_capital=assumptions.working_capital,
+                net_ppe=net_ppe,
+                total_assets=total_assets,
+                debt=debt_balance,
+                equity=equity,
+                retained_earnings=retained,
+                debt_to_equity=debt_to_equity,
+            )
+        )
+
+    return {
+        "income_statement": income_rows,
+        "balance_sheet": balance_rows,
+        "cash_flow_statement": cash_statement,
+        "loan_schedule": loan_schedule,
+    }
+
+
+def compute_advanced_analytics(
+    cashflows: List[CashFlowRow],
+    income_statement: List[IncomeStatementRow],
+) -> Dict[str, Any]:
+    metrics: List[Dict[str, Any]] = []
+
+    if income_statement:
+        avg_ebitda_margin = sum(row.ebitda_margin for row in income_statement) / len(income_statement)
+        avg_net_margin = sum(row.net_margin for row in income_statement) / len(income_statement)
+    else:
+        avg_ebitda_margin = 0.0
+        avg_net_margin = 0.0
+
+    dscr_rows: List[Dict[str, float]] = []
+    dscr_values: List[float] = []
+    cumulative = 0.0
+    payback = float("nan")
+
+    for row in cashflows:
+        cumulative += row.free_cash_flow
+        if payback != payback and cumulative >= 0 and row.year > 0:
+            prev_cumulative = cumulative - row.free_cash_flow
+            if row.free_cash_flow != 0:
+                fraction = (0 - prev_cumulative) / row.free_cash_flow
+                payback = (row.year - 1) + fraction
+            else:
+                payback = row.year
+
+        if row.year == 0 or row.debt_service == 0:
+            continue
+
+        cash_available = row.operating_cash_flow + row.interest_expense
+        dscr = cash_available / row.debt_service if row.debt_service else float("nan")
+        dscr_rows.append({"year": row.year, "dscr": dscr})
+        if dscr == dscr:
+            dscr_values.append(dscr)
+
+    avg_dscr = sum(dscr_values) / len(dscr_values) if dscr_values else float("nan")
+    min_dscr = min(dscr_values) if dscr_values else float("nan")
+
+    metrics.extend(
+        [
+            {"metric": "Average EBITDA margin", "value": avg_ebitda_margin},
+            {"metric": "Average net margin", "value": avg_net_margin},
+            {"metric": "Average DSCR", "value": avg_dscr},
+            {"metric": "Minimum DSCR", "value": min_dscr},
+            {"metric": "Payback period (years)", "value": payback},
+        ]
+    )
+
+    trend_rows = [
+        {
+            "year": row.year,
+            "revenue": row.revenue,
+            "ebitda": row.ebitda,
+            "net_income": row.net_income,
+            "free_cash_flow": row.free_cash_flow,
+            "cumulative_cash": row.cumulative_cash,
+        }
+        for row in cashflows
+        if row.year > 0
+    ]
+
+    return {"metrics": metrics, "dscr": dscr_rows, "trend": trend_rows}
 
 
 def npv(rate: float, cashflows: Iterable[float]) -> float:
@@ -472,8 +718,10 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
     assumption_schedule = build_assumptions_schedule(assumptions)
     cycles = compute_cycles(assumptions)
     annual = annual_summary(assumptions, cycles)
-    cashflows = discounted_cash_flow(assumptions, annual)
+    cashflows, loan_schedule = discounted_cash_flow(assumptions, annual)
     revenue_schedules = build_revenue_schedules(assumptions, cycles)
+    financials = build_financial_statements(assumptions, cashflows, loan_schedule)
+    advanced = compute_advanced_analytics(cashflows, financials["income_statement"])
 
     valuation_cashflows = [row.free_cash_flow for row in cashflows]
     discount_rate = assumptions.discount_rate
@@ -496,6 +744,8 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
         "cashflows": cashflows,
         "revenue_schedules": revenue_schedules,
         "valuation": valuation,
+        "financial_statements": financials,
+        "advanced_analytics": advanced,
     }
 
 
@@ -516,6 +766,13 @@ def main() -> None:
     cashflows = results["cashflows"]
     valuation = results["valuation"]
     revenue_schedules = results["revenue_schedules"]
+    financials = results["financial_statements"]
+    advanced = results["advanced_analytics"]
+
+    income_statement = financials["income_statement"]
+    balance_sheet = financials["balance_sheet"]
+    cash_flow_statement = financials["cash_flow_statement"]
+    loan_schedule = financials["loan_schedule"]
 
     if "csv" in args.formats:
         write_csv(output_dir / "assumptions_summary.csv", assumption_schedule)
@@ -523,6 +780,13 @@ def main() -> None:
         write_csv(output_dir / "production_cycles.csv", [asdict(cycle) for cycle in cycles])
         write_csv(output_dir / "annual_summary.csv", [asdict(annual)])
         write_csv(output_dir / "cash_flow.csv", [asdict(row) for row in cashflows])
+        write_csv(output_dir / "income_statement.csv", [asdict(row) for row in income_statement])
+        write_csv(output_dir / "balance_sheet.csv", [asdict(row) for row in balance_sheet])
+        write_csv(output_dir / "cash_flow_statement.csv", [asdict(row) for row in cash_flow_statement])
+        write_csv(output_dir / "loan_schedule.csv", loan_schedule)
+        write_csv(output_dir / "advanced_metrics.csv", advanced["metrics"])
+        write_csv(output_dir / "dscr_summary.csv", advanced["dscr"])
+        write_csv(output_dir / "trend_analysis.csv", advanced["trend"])
         for category, rows in revenue_schedules.items():
             safe = (
                 category.lower()
@@ -540,6 +804,11 @@ def main() -> None:
         write_json(output_dir / "production_cycles.json", [asdict(cycle) for cycle in cycles])
         write_json(output_dir / "annual_summary.json", asdict(annual))
         write_json(output_dir / "cash_flow.json", [asdict(row) for row in cashflows])
+        write_json(output_dir / "income_statement.json", [asdict(row) for row in income_statement])
+        write_json(output_dir / "balance_sheet.json", [asdict(row) for row in balance_sheet])
+        write_json(output_dir / "cash_flow_statement.json", [asdict(row) for row in cash_flow_statement])
+        write_json(output_dir / "loan_schedule.json", loan_schedule)
+        write_json(output_dir / "advanced_analytics.json", advanced)
         write_json(output_dir / "revenue_schedules.json", revenue_schedules)
 
     write_json(output_dir / "valuation.json", valuation)

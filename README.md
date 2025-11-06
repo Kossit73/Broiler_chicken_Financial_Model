@@ -79,16 +79,14 @@ refresh instantly. Below the metrics you will find three workspaces:
    four schedules), detailed revenue schedules, production cycle results, annual
    summary, and discounted cash flows.
 2. **Financial statements** – exposes the modeled income statement, balance
-   sheet, cash flow statement, and debt amortization tables with download
-   buttons for each.
+   sheet, cash flow statement, and debt amortization tables.
 3. **Advanced analytics** – surfaces KPIs (average margins, DSCR, payback) and
    line charts for DSCR and long-range revenue/EBITDA/net-income/free-cash-flow
    trends.
 
-Each workspace includes CSV download buttons keyed to the active scenario so
-you can export the current view without rerunning the CLI. The Production &
-revenues tab also exposes an **Excel export** card—click *Prepare Excel Model*
-to generate a multi-sheet workbook and download it directly from the browser.
+The Production & revenues tab includes an **Excel export** card—click *Prepare
+Excel Model* to generate a multi-sheet workbook and download it directly from
+the browser.
 
 Open the **AI & Machine Learning Settings** expander in the Advanced analytics
 tab to configure optional forecasting and narrative preferences. The settings

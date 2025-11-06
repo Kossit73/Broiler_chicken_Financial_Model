@@ -183,38 +183,6 @@ class ScenarioModel:
 
     scenario: str
     assumptions: Assumptions
-
-
-def to_csv(dataframe: pd.DataFrame) -> bytes:
-    """Return the CSV representation of ``dataframe`` as UTF-8 bytes."""
-
-    if dataframe is None or dataframe.empty:
-        return b""
-
-    buffer = BytesIO()
-    buffer.write(dataframe.to_csv(index=False).encode("utf-8"))
-    return buffer.getvalue()
-
-
-def render_download_button(
-    label: str, dataframe: pd.DataFrame, file_name: str, key_suffix: str = ""
-):
-    csv_bytes = to_csv(dataframe)
-    disabled = len(csv_bytes) == 0
-    key = f"download-{file_name}"
-    if key_suffix:
-        key = f"{key}-{key_suffix}"
-    st.download_button(
-        label,
-        data=csv_bytes,
-        file_name=file_name,
-        mime="text/csv",
-        disabled=disabled,
-        key=key,
-        help="CSV download is unavailable" if disabled else None,
-    )
-
-
 def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = None) -> None:
     """Render AI and machine-learning configuration controls."""
 
@@ -697,59 +665,21 @@ def main() -> None:
                 use_container_width=True,
                 hide_index=True,
             )
-        render_download_button(
-            "Download assumptions CSV",
-            assumption_schedule_df,
-            "assumptions_summary.csv",
-            key_suffix=selected_scenario,
-        )
 
         st.subheader("Revenue schedules")
         for category, rows in revenue_schedules.items():
             st.markdown(f"**{category}**")
             schedule_df = pd.DataFrame(rows)
             st.dataframe(schedule_df, use_container_width=True, hide_index=True)
-            safe_name = (
-                category.lower()
-                .replace(" ", "_")
-                .replace("(", "")
-                .replace(")", "")
-                .replace(",", "")
-                .replace("-", "_")
-            )
-            render_download_button(
-                f"Download {category.lower()} CSV",
-                schedule_df,
-                f"{safe_name}_schedule.csv",
-                key_suffix=selected_scenario,
-            )
 
         st.subheader("Production cycles")
         st.dataframe(cycles_df, use_container_width=True)
-        render_download_button(
-            "Download cycles CSV",
-            cycles_df,
-            "production_cycles.csv",
-            key_suffix=selected_scenario,
-        )
 
         st.subheader("Annual summary")
         st.dataframe(annual_df, use_container_width=True)
-        render_download_button(
-            "Download annual CSV",
-            annual_df,
-            "annual_summary.csv",
-            key_suffix=selected_scenario,
-        )
 
         st.subheader("Discounted cash flows")
         st.dataframe(cashflow_df, use_container_width=True)
-        render_download_button(
-            "Download cash flow CSV",
-            cashflow_df,
-            "cash_flow.csv",
-            key_suffix=selected_scenario,
-        )
 
     with financials_tab:
         fin_tab1, fin_tab2, fin_tab3, fin_tab4 = st.tabs(
@@ -762,57 +692,21 @@ def main() -> None:
         )
         with fin_tab1:
             st.dataframe(income_df, use_container_width=True, hide_index=True)
-            render_download_button(
-                "Download income statement CSV",
-                income_df,
-                "income_statement.csv",
-                key_suffix=selected_scenario,
-            )
         with fin_tab2:
             st.dataframe(balance_df, use_container_width=True, hide_index=True)
-            render_download_button(
-                "Download balance sheet CSV",
-                balance_df,
-                "balance_sheet.csv",
-                key_suffix=selected_scenario,
-            )
         with fin_tab3:
             st.dataframe(cash_statement_df, use_container_width=True, hide_index=True)
-            render_download_button(
-                "Download cash flow statement CSV",
-                cash_statement_df,
-                "cash_flow_statement.csv",
-                key_suffix=selected_scenario,
-            )
         with fin_tab4:
             st.dataframe(loan_df, use_container_width=True, hide_index=True)
-            render_download_button(
-                "Download debt schedule CSV",
-                loan_df,
-                "loan_schedule.csv",
-                key_suffix=selected_scenario,
-            )
 
     with analytics_tab:
         st.subheader("Advanced metrics")
         st.dataframe(metrics_df, use_container_width=True, hide_index=True)
-        render_download_button(
-            "Download metrics CSV",
-            metrics_df,
-            "advanced_metrics.csv",
-            key_suffix=selected_scenario,
-        )
 
         if not dscr_df.empty:
             st.subheader("Debt service coverage ratio")
             dscr_chart = dscr_df.set_index("year")
             st.line_chart(dscr_chart)
-            render_download_button(
-                "Download DSCR CSV",
-                dscr_df,
-                "dscr_summary.csv",
-                key_suffix=selected_scenario,
-            )
 
         if not trend_df.empty:
             st.subheader("Performance trends")
@@ -820,12 +714,6 @@ def main() -> None:
                 ["revenue", "ebitda", "net_income", "free_cash_flow"]
             ]
             st.line_chart(trend_chart)
-            render_download_button(
-                "Download trend CSV",
-                trend_df,
-                "trend_analysis.csv",
-                key_suffix=selected_scenario,
-            )
 
         ai_expander = st.expander("AI & Machine Learning Settings")
         _render_ai_settings(payload, ai_expander)

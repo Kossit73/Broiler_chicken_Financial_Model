@@ -786,8 +786,36 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         [
             {
                 "attr": "live_price_per_kg",
-                "label": "Live price per kg",
+                "label": "Live broiler price per kg",
                 "min": 0.5,
+                "max": 5.0,
+                "step": 0.05,
+            },
+            {
+                "attr": "eggs_price_per_dozen",
+                "label": "Eggs price per dozen",
+                "min": 0.5,
+                "max": 8.0,
+                "step": 0.1,
+            },
+            {
+                "attr": "manure_price_per_ton",
+                "label": "Poultry manure price per ton",
+                "min": 0.0,
+                "max": 150.0,
+                "step": 1.0,
+            },
+            {
+                "attr": "live_bird_price_per_head",
+                "label": "Live bird price per head",
+                "min": 0.0,
+                "max": 10.0,
+                "step": 0.1,
+            },
+            {
+                "attr": "byproduct_price_per_kg",
+                "label": "By-product price per kg",
+                "min": 0.0,
                 "max": 5.0,
                 "step": 0.05,
             },
@@ -800,7 +828,7 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
                 "format": "%.3f",
             },
         ],
-        columns=2,
+        columns=3,
     )
 
     render_section(
@@ -1014,6 +1042,10 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         working_capital=float(values["working_capital"]),
         discount_rate=float(values["discount_rate"]),
         price_growth=float(values["price_growth"]),
+        eggs_price_per_dozen=float(values["eggs_price_per_dozen"]),
+        manure_price_per_ton=float(values["manure_price_per_ton"]),
+        live_bird_price_per_head=float(values["live_bird_price_per_head"]),
+        byproduct_price_per_kg=float(values["byproduct_price_per_kg"]),
         cost_inflation=float(values["cost_inflation"]),
         tax_rate=float(values["tax_rate"]),
         debt_ratio=float(values["debt_ratio"]),

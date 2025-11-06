@@ -70,7 +70,10 @@ streamlit run streamlit_app.py
 
 The dashboard now presents all inputs on a single **Input Landing Page** that
 groups controls into Production, Pricing, Costs, and Capital & financing
-sections. A scenario selector at the top lets you maintain alternative
+sections. The refreshed Pricing block now exposes dedicated inputs for broiler,
+egg, manure, live-bird, and by-product prices alongside the annual price growth
+assumption so each revenue stream can be tuned individually. A scenario selector
+at the top lets you maintain alternative
 assumption sets (Baseline, Expansion, Downside) without losing previous
 configurations. As you tweak values, the NPV/IRR metrics and detailed tables
 refresh instantly. Below the metrics you will find three workspaces:

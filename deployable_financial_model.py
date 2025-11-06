@@ -25,6 +25,10 @@ class Assumptions:
     mortality_rate: float = 0.05
     final_weight_kg: float = 2.5
     live_price_per_kg: float = 1.85
+    eggs_price_per_dozen: float = 1.9
+    manure_price_per_ton: float = 45.0
+    live_bird_price_per_head: float = 1.5
+    byproduct_price_per_kg: float = 0.35
     chick_cost: float = 0.55
     feed_conversion_ratio: float = 1.65
     feed_cost_per_kg: float = 0.42
@@ -60,6 +64,10 @@ ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Production", "Final weight (kg)", "final_weight_kg"),
     ("Production", "Feed conversion ratio", "feed_conversion_ratio"),
     ("Production", "Live price per kg", "live_price_per_kg"),
+    ("Production", "Eggs price per dozen", "eggs_price_per_dozen"),
+    ("Production", "Manure price per ton", "manure_price_per_ton"),
+    ("Production", "Live bird price per head", "live_bird_price_per_head"),
+    ("Production", "By-product price per kg", "byproduct_price_per_kg"),
     ("Production", "Annual price growth", "price_growth"),
     ("Operating costs", "Feed cost per kg", "feed_cost_per_kg"),
     ("Operating costs", "Chick cost per bird", "chick_cost"),
@@ -303,6 +311,13 @@ def build_revenue_schedules(
 
     # Templates for other revenue categories so users can enter supplemental sales.
     template_periods = assumptions.cycles_per_year or 1
+    price_lookup = {
+        "Eggs Revenue": assumptions.eggs_price_per_dozen,
+        "Poultry Manure Revenue": assumptions.manure_price_per_ton,
+        "Live Birds Revenue": assumptions.live_bird_price_per_head,
+        "By-Product (feathers, offal, livers) Revenue": assumptions.byproduct_price_per_kg,
+    }
+
     for category in REVENUE_CATEGORIES[1:]:
         template_rows = []
         for period in range(1, template_periods + 1):
@@ -311,7 +326,7 @@ def build_revenue_schedules(
                     "Category": category,
                     "Period": f"Cycle {period}",
                     "Units": None,
-                    "Unit price": None,
+                    "Unit price": price_lookup.get(category),
                     "Revenue": None,
                     "Notes": "Template (enter values)",
                 }

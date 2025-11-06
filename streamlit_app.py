@@ -340,60 +340,71 @@ def _render_schedule_editor(
     fixed_columns = fixed_columns or {}
     row_defaults = row_defaults or {}
 
-    controls = st.columns(2)
+    edit_toggle_key = f"edit_enabled_{namespace}_{schedule_key}_{scenario}"
+    edit_enabled = st.checkbox(
+        "Enable editing",
+        value=st.session_state.get(edit_toggle_key, True),
+        key=edit_toggle_key,
+        help="Toggle to edit this schedule. When disabled the schedule is read-only.",
+    )
+
     operation_applied = False
-    if controls[0].button(
-        "Add row",
-        key=f"add_{namespace}_{schedule_key}_{scenario}",
-    ):
-        df = _add_schedule_row(df, row_defaults=row_defaults, fixed_columns=fixed_columns)
-        operation_applied = True
-    if controls[1].button(
-        "Remove row",
-        key=f"remove_{namespace}_{schedule_key}_{scenario}",
-    ):
-        if not df.empty:
-            df = df.iloc[:-1].reset_index(drop=True)
-            operation_applied = True
-
-    df = _ensure_fixed_columns(df, fixed_columns)
-
-    numeric_columns = [
-        column
-        for column in df.columns
-        if pd.to_numeric(df[column], errors="coerce").notna().sum() > 0
-    ]
-
-    if allow_yearly_increment and numeric_columns:
-        inc_cols, inc_rate_col, inc_btn_col = st.columns([2, 1, 1])
-        selected_columns = inc_cols.multiselect(
-            "Yearly increment columns",
-            options=numeric_columns,
-            default=numeric_columns,
-            key=f"inc_cols_{namespace}_{schedule_key}_{scenario}",
-            help="Select numeric columns that should follow the yearly increment growth.",
-        )
-        increment_rate = inc_rate_col.number_input(
-            "Yearly increment (%)",
-            min_value=-100.0,
-            max_value=100.0,
-            value=0.0,
-            step=0.5,
-            key=f"inc_rate_{namespace}_{schedule_key}_{scenario}",
-        )
-        if inc_btn_col.button(
-            "Apply yearly increment",
-            key=f"apply_inc_{namespace}_{schedule_key}_{scenario}",
+    if edit_enabled:
+        controls = st.columns(2)
+        if controls[0].button(
+            "Add row",
+            key=f"add_{namespace}_{schedule_key}_{scenario}",
         ):
-            if selected_columns:
-                df = _apply_yearly_increment(df, selected_columns, increment_rate / 100.0)
+            df = _add_schedule_row(df, row_defaults=row_defaults, fixed_columns=fixed_columns)
+            operation_applied = True
+        if controls[1].button(
+            "Remove row",
+            key=f"remove_{namespace}_{schedule_key}_{scenario}",
+        ):
+            if not df.empty:
+                df = df.iloc[:-1].reset_index(drop=True)
                 operation_applied = True
-            else:
-                st.warning("Select at least one column before applying an increment.")
-    elif allow_yearly_increment:
-        st.caption("No numeric columns available for yearly increment.")
 
-    if operation_applied and auto_update_revenue:
+        df = _ensure_fixed_columns(df, fixed_columns)
+
+        numeric_columns = [
+            column
+            for column in df.columns
+            if pd.to_numeric(df[column], errors="coerce").notna().sum() > 0
+        ]
+
+        if allow_yearly_increment and numeric_columns:
+            inc_cols, inc_rate_col, inc_btn_col = st.columns([2, 1, 1])
+            selected_columns = inc_cols.multiselect(
+                "Yearly increment columns",
+                options=numeric_columns,
+                default=numeric_columns,
+                key=f"inc_cols_{namespace}_{schedule_key}_{scenario}",
+                help="Select numeric columns that should follow the yearly increment growth.",
+            )
+            increment_rate = inc_rate_col.number_input(
+                "Yearly increment (%)",
+                min_value=-100.0,
+                max_value=100.0,
+                value=0.0,
+                step=0.5,
+                key=f"inc_rate_{namespace}_{schedule_key}_{scenario}",
+            )
+            if inc_btn_col.button(
+                "Apply yearly increment",
+                key=f"apply_inc_{namespace}_{schedule_key}_{scenario}",
+            ):
+                if selected_columns:
+                    df = _apply_yearly_increment(df, selected_columns, increment_rate / 100.0)
+                    operation_applied = True
+                else:
+                    st.warning("Select at least one column before applying an increment.")
+        elif allow_yearly_increment:
+            st.caption("No numeric columns available for yearly increment.")
+    else:
+        st.caption("Enable editing to modify this schedule. Current values remain read-only.")
+
+    if (operation_applied and auto_update_revenue) or (auto_update_revenue and edit_enabled):
         df = _auto_compute_revenue(df)
 
     df = _ensure_fixed_columns(df, fixed_columns)
@@ -409,10 +420,13 @@ def _render_schedule_editor(
         use_container_width=True,
         hide_index=True,
         column_config=column_config,
+        disabled=not edit_enabled,
         key=f"editor_{namespace}_{schedule_key}_{scenario}",
     )
 
     edited_df = pd.DataFrame(edited_df)
+    if auto_update_revenue:
+        edited_df = _auto_compute_revenue(edited_df)
     edited_df = _ensure_fixed_columns(edited_df, fixed_columns)
     state["data"] = edited_df.replace({pd.NA: None}).to_dict("records")
     return edited_df.reindex(columns=original_columns, fill_value=None)

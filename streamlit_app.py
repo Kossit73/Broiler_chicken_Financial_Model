@@ -320,7 +320,13 @@ def main() -> None:
     col3.metric("Discount rate", f"{valuation['discount_rate']:.2%}")
 
     st.subheader("Assumptions summary")
-    st.dataframe(assumption_schedule_df, use_container_width=True, hide_index=True)
+    for schedule_name, group in assumption_schedule_df.groupby("schedule", sort=False):
+        st.markdown(f"**{schedule_name}**")
+        st.dataframe(
+            group.drop(columns=["schedule"]),
+            use_container_width=True,
+            hide_index=True,
+        )
     render_download_button("Download assumptions CSV", assumption_schedule_df, "assumptions_summary.csv")
 
     cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])

@@ -53,18 +53,18 @@ class Assumptions:
 
 
 ASSUMPTION_SCHEDULE_LAYOUT = [
-    ("Farm profile", "Farm name", "farm_name"),
+    ("Production", "Farm name", "farm_name"),
     ("Production", "Cycles per year", "cycles_per_year"),
     ("Production", "Birds placed per cycle", "birds_per_cycle"),
     ("Production", "Mortality rate", "mortality_rate"),
     ("Production", "Final weight (kg)", "final_weight_kg"),
-    ("Pricing", "Live price per kg", "live_price_per_kg"),
-    ("Pricing", "Annual price growth", "price_growth"),
-    ("Feed & animal health", "Feed conversion ratio", "feed_conversion_ratio"),
-    ("Feed & animal health", "Feed cost per kg", "feed_cost_per_kg"),
-    ("Feed & animal health", "Chick cost", "chick_cost"),
-    ("Feed & animal health", "Processing cost per bird", "processing_cost_per_bird"),
-    ("Feed & animal health", "Vaccination cost per bird", "vaccination_cost_per_bird"),
+    ("Production", "Feed conversion ratio", "feed_conversion_ratio"),
+    ("Production", "Live price per kg", "live_price_per_kg"),
+    ("Production", "Annual price growth", "price_growth"),
+    ("Operating costs", "Feed cost per kg", "feed_cost_per_kg"),
+    ("Operating costs", "Chick cost per bird", "chick_cost"),
+    ("Operating costs", "Processing cost per bird", "processing_cost_per_bird"),
+    ("Operating costs", "Vaccination cost per bird", "vaccination_cost_per_bird"),
     ("Operating costs", "Litter & disposal per cycle", "litter_disposal_per_cycle"),
     ("Operating costs", "Propane per cycle", "propane_per_cycle"),
     ("Operating costs", "Electricity per cycle", "electricity_per_cycle"),
@@ -75,8 +75,8 @@ ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Operating costs", "Overhead per cycle", "overhead_per_cycle"),
     ("Capital structure", "Housing capex", "capex_housing"),
     ("Capital structure", "Equipment capex", "capex_equipment"),
-    ("Capital structure", "Working capital", "working_capital"),
     ("Capital structure", "Maintenance capex (annual)", "maintenance_capex_annual"),
+    ("Capital structure", "Working capital", "working_capital"),
     ("Capital structure", "Depreciation years", "depreciation_years"),
     ("Financing", "Debt ratio", "debt_ratio"),
     ("Financing", "Debt interest rate", "debt_interest_rate"),
@@ -209,17 +209,19 @@ def compute_cycle(assumptions: Assumptions, cycle_number: int) -> CycleResults:
 
 
 def build_assumptions_schedule(assumptions: Assumptions) -> List[Dict[str, Any]]:
-    """Return a tabular schedule summarising model assumptions."""
+    """Return a tabular schedule summarising model assumptions grouped by schedule."""
 
     raw = asdict(assumptions)
-    schedule: List[Dict[str, Any]] = []
-    for category, label, key in ASSUMPTION_SCHEDULE_LAYOUT:
-        schedule.append({
-            "category": category,
-            "item": label,
-            "value": raw.get(key),
-        })
-    return schedule
+    schedule_rows: List[Dict[str, Any]] = []
+    for schedule, label, key in ASSUMPTION_SCHEDULE_LAYOUT:
+        schedule_rows.append(
+            {
+                "schedule": schedule,
+                "item": label,
+                "value": raw.get(key),
+            }
+        )
+    return schedule_rows
 
 
 def compute_cycles(assumptions: Assumptions) -> List[CycleResults]:

@@ -28,8 +28,9 @@ python deployable_financial_model.py --out outputs --formats csv json
 
 The command creates the `outputs/` directory (if needed) and writes:
 
-- `assumptions_summary.(csv|json)` – schedule-style table grouped by category
-  for every model assumption.
+- `assumptions_summary.(csv|json)` – four-schedule table (Production,
+  Operating costs, Capital structure, Financing) that captures every model
+  assumption.
 - `assumptions.(csv|json)` – raw key/value assumptions used by the model.
 - `production_cycles.(csv|json)` – production and cost metrics for each flock
   cycle within a year.

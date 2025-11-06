@@ -93,6 +93,35 @@ tab to configure optional forecasting and narrative preferences. The settings
 panel stores values per scenario and supports multiple providers, model names,
 and narrative focus areas.
 
+### Configuring editable schedules
+
+The Streamlit app exposes every assumption and revenue table through a shared
+editor so users can tweak defaults, add rows, and apply yearly increments.
+When adding a new schedule or adjusting the defaults of an existing one:
+
+1. **Provide default rows** – pass a list of dictionaries (or dataclass
+   instances) to `_render_schedule_editor`. Values are normalised via
+   `_normalise_schedule_rows`, so the editor always starts with the supplied
+   defaults for the active scenario.
+2. **Optionally lock columns** – use the `fixed_columns` argument to enforce
+   read-only headers such as the category name while allowing other fields to be
+   edited.
+3. **Seed “Add row” templates** – supply `row_defaults` to pre-populate new
+   rows with sensible values (for example, a default note or the next period
+   label).
+4. **Enable yearly growth** – leave `allow_yearly_increment=True` (the default)
+   so users can apply compound growth to any numeric column. The helper safely
+   coerces the selected columns to floats before applying the increment.
+5. **Persist the edited data** – the helper writes the current rows back to
+   `st.session_state` under the provided namespace and scenario key. Callers can
+   consume the returned `DataFrame` immediately to refresh downstream
+   calculations.
+
+Because the default rows are stored alongside their original snapshot, updating
+the source data automatically resets the table for new scenarios while keeping
+existing edits intact. See `_render_schedule_editor` and
+`_initialise_schedule_state` in `streamlit_app.py` for reference usage.
+
 ## Revenue schedules helper (optional)
 
 If you maintain a separate Excel-based poultry model, you can generate

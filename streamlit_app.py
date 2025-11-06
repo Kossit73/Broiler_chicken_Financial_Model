@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from io import BytesIO
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -194,6 +194,27 @@ class ScenarioModel:
     assumptions: Assumptions
 
 
+def _normalise_schedule_rows(rows: List[Any]) -> List[Dict[str, Any]]:
+    """Return a list of dictionaries for any supported row payload."""
+
+    normalised: List[Dict[str, Any]] = []
+    for row in rows:
+        if row is None:
+            continue
+        if isinstance(row, dict):
+            normalised.append(copy.deepcopy(row))
+        elif is_dataclass(row):
+            normalised.append(asdict(row))
+        else:
+            try:
+                normalised.append(dict(row))
+            except TypeError:
+                raise TypeError(
+                    "Schedule defaults must be dict-like or dataclass instances."
+                ) from None
+    return normalised
+
+
 def _initialise_schedule_state(
     namespace: str,
     scenario: str,
@@ -204,7 +225,7 @@ def _initialise_schedule_state(
 
     store = st.session_state.setdefault(namespace, {})
     scenario_store = store.setdefault(scenario, {})
-    default_records = copy.deepcopy(default_rows)
+    default_records = _normalise_schedule_rows(default_rows)
     state = scenario_store.get(schedule_key)
     if state is None:
         state = {
@@ -336,7 +357,28 @@ def _render_schedule_editor(
     allow_yearly_increment: bool = True,
     auto_update_revenue: bool = False,
 ) -> pd.DataFrame:
-    """Render an editable schedule with add/remove and yearly increment controls."""
+    """Render an editable schedule with add/remove and yearly increment controls.
+
+    Parameters
+    ----------
+    title, schedule_key
+        Identifiers for the UI caption and the per-schedule state slot.
+    default_rows
+        List of default row dictionaries (or dataclasses) that seed the editor
+        when no user overrides have been captured for the active scenario.
+    scenario, namespace
+        Keys used to scope the stored state inside ``st.session_state``.
+    fixed_columns
+        Optional mapping of column names to constant values. These columns are
+        enforced after every edit and rendered as read-only in the table.
+    row_defaults
+        Optional template applied when users click “Add row”.
+    allow_yearly_increment
+        Enables the yearly growth controls when the schedule contains numeric
+        columns.
+    auto_update_revenue
+        Recomputes ``Revenue`` from ``Units`` × ``Unit price`` after edits.
+    """
 
     st.markdown(f"**{title}**")
     df, state = _initialise_schedule_state(namespace, scenario, schedule_key, default_rows)

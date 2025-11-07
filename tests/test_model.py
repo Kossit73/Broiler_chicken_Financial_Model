@@ -1,4 +1,5 @@
 import math
+import math
 import unittest
 
 from broiler_model.assumptions import Assumptions
@@ -63,6 +64,17 @@ class AdvancedAnalyticsTests(unittest.TestCase):
             monte_carlo["summary"].get("iterations"),
             monte_carlo["settings"].get("iterations"),
         )
+        self.assertIn("distributions", monte_carlo["settings"])
+
+        custom_definitions = analytics.get("custom_simulation_definitions", [])
+        self.assertTrue(custom_definitions)
+
+        custom_payload = analytics.get("custom_simulations", {})
+        self.assertIn("delta_summary", custom_payload)
+
+        break_even_rows = analytics.get("break_even", [])
+        if break_even_rows:
+            self.assertIn("Direct cost", break_even_rows[0])
 
 
 if __name__ == "__main__":  # pragma: no cover

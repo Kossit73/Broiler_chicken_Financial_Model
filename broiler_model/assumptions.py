@@ -86,38 +86,6 @@ ASSUMPTION_SCHEDULE_LAYOUT = [
 ]
 
 
-DEFAULT_CUSTOM_SIMULATION_DEFINITIONS: List[Dict[str, Any]] = [
-    {
-        "Scenario": "Live price +5%",
-        "Description": "Increase live bird price per kg by 5%",
-        "Parameter": "live_price_per_kg",
-        "Change type": "percent",
-        "Change value": 5.0,
-    },
-    {
-        "Scenario": "Feed cost -5%",
-        "Description": "Reduce feed cost per kg by 5%",
-        "Parameter": "feed_cost_per_kg",
-        "Change type": "percent",
-        "Change value": -5.0,
-    },
-    {
-        "Scenario": "Mortality -1pp",
-        "Description": "Lower mortality rate by 1 percentage point",
-        "Parameter": "mortality_rate",
-        "Change type": "absolute",
-        "Change value": -0.01,
-    },
-    {
-        "Scenario": "Price growth target 3%",
-        "Description": "Set long-term price growth to 3%",
-        "Parameter": "price_growth",
-        "Change type": "target",
-        "Change value": 0.03,
-    },
-]
-
-
 REVENUE_CATEGORIES = [
     "Broiler Revenue",
     "Eggs Revenue",

@@ -5,12 +5,17 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import replace
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .assumptions import (
-    Assumptions,
-    DEFAULT_CUSTOM_SIMULATION_DEFINITIONS,
-    REVENUE_CATEGORIES,
+try:  # pragma: no cover - optional dependency
+    import numpy as np  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    np = None  # type: ignore
+
+from .assumptions import Assumptions, REVENUE_CATEGORIES
+from .config import (
+    load_custom_simulation_definitions,
+    load_monte_carlo_distributions,
 )
 from .financing import (
     CashFlowRow,
@@ -187,6 +192,7 @@ def run_custom_simulations(
     definitions: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     processed: List[Dict[str, Any]] = []
+    invalid: List[Dict[str, Any]] = []
     results: List[Dict[str, Any]] = []
 
     base_entry = {
@@ -208,11 +214,12 @@ def run_custom_simulations(
         if not isinstance(definition, dict):
             continue
 
+        original = dict(definition)
         name = str(definition.get("Scenario") or definition.get("name") or "").strip()
         parameter = str(
             definition.get("Parameter") or definition.get("parameter") or ""
         ).strip()
-        change_type = str(
+        change_type_raw = str(
             definition.get("Change type")
             or definition.get("change_type")
             or "percent"
@@ -220,28 +227,40 @@ def run_custom_simulations(
         change_value_raw = definition.get("Change value") or definition.get("change_value")
         description = definition.get("Description") or definition.get("description") or ""
 
-        if not name or not parameter or not hasattr(assumptions, parameter):
+        if not name:
+            original["error"] = "Scenario name is required"
+            invalid.append(original)
+            continue
+        if not parameter or not hasattr(assumptions, parameter):
+            original["error"] = "Unknown or missing parameter"
+            invalid.append(original)
             continue
 
         try:
             change_value = float(change_value_raw)
         except (TypeError, ValueError):
+            original["error"] = "Change value must be numeric"
+            invalid.append(original)
             continue
 
         current_value = getattr(assumptions, parameter)
         if current_value is None:
+            original["error"] = "Parameter has no base value"
+            invalid.append(original)
             continue
 
-        if change_type in {"percent", "percentage", "%"}:
+        if change_type_raw in {"percent", "percentage", "%"}:
             mutated_value = current_value * (1.0 + change_value / 100.0)
             applied_type = "percent"
-        elif change_type in {"absolute", "delta"}:
+        elif change_type_raw in {"absolute", "delta"}:
             mutated_value = current_value + change_value
             applied_type = "absolute"
-        elif change_type in {"target", "value"}:
+        elif change_type_raw in {"target", "value"}:
             mutated_value = change_value
             applied_type = "target"
         else:
+            original["error"] = "Unsupported change type"
+            invalid.append(original)
             continue
 
         mutated = replace(assumptions, **{parameter: mutated_value})
@@ -270,50 +289,168 @@ def run_custom_simulations(
             }
         )
 
-    return {"definitions": processed, "results": results}
+    delta_summary = [
+        {
+            "Scenario": row["Scenario"],
+            "NPV": row["NPV"],
+            "NPV Δ": row["NPV Δ"],
+            "IRR": row["IRR"],
+        }
+        for row in results
+        if row.get("Scenario") and row["Scenario"] != "Baseline"
+    ]
+
+    return {
+        "definitions": processed,
+        "results": results,
+        "invalid": invalid,
+        "delta_summary": delta_summary,
+    }
+
+
+def _draw_samples(
+    rng_np: Optional["np.random.Generator"],
+    rng_py: random.Random,
+    parameter: str,
+    base_value: float,
+    spec: Dict[str, Any],
+    iterations: int,
+) -> Optional[Sequence[float]]:
+    distribution = str(spec.get("distribution", "normal")).lower()
+    mode = str(spec.get("mode", "multiplicative")).lower()
+
+    use_numpy = rng_np is not None and np is not None
+
+    if distribution == "normal":
+        mean = float(
+            spec.get("mean", 1.0 if mode in {"multiplicative", "relative"} else 0.0)
+        )
+        std = float(spec.get("std", 0.05))
+        if use_numpy:
+            draws = rng_np.normal(mean, std, size=iterations)  # type: ignore[attr-defined]
+        else:
+            draws = [rng_py.gauss(mean, std) for _ in range(iterations)]
+    elif distribution == "lognormal":
+        mean = float(spec.get("mean", 0.0))
+        sigma = float(spec.get("sigma", 0.1))
+        if use_numpy:
+            draws = rng_np.lognormal(mean, sigma, size=iterations)  # type: ignore[attr-defined]
+        else:
+            draws = [rng_py.lognormvariate(mean, sigma) for _ in range(iterations)]
+    elif distribution == "triangular":
+        low = spec.get("low")
+        high = spec.get("high")
+        mode_value = spec.get("mode_value", spec.get("mode_point", spec.get("mode_param")))
+        if mode_value is None and isinstance(spec.get("mode"), (int, float)):
+            mode_value = spec.get("mode")
+        if low is None or high is None:
+            return None
+        if mode_value is None:
+            mode_value = (float(low) + float(high)) / 2.0
+        if use_numpy:
+            draws = rng_np.triangular(  # type: ignore[attr-defined]
+                float(low), float(mode_value), float(high), size=iterations
+            )
+        else:
+            draws = [
+                rng_py.triangular(float(low), float(high), float(mode_value))
+                for _ in range(iterations)
+            ]
+    elif distribution == "uniform":
+        low = spec.get("low", spec.get("min"))
+        high = spec.get("high", spec.get("max"))
+        if low is None or high is None:
+            return None
+        if use_numpy:
+            draws = rng_np.uniform(float(low), float(high), size=iterations)  # type: ignore[attr-defined]
+        else:
+            draws = [rng_py.uniform(float(low), float(high)) for _ in range(iterations)]
+    else:
+        return None
+
+    if mode in {"multiplicative", "relative"}:
+        if use_numpy:
+            values = base_value * draws  # type: ignore[operator]
+        else:
+            values = [base_value * float(val) for val in draws]  # type: ignore[call-overload]
+    elif mode in {"additive", "delta"}:
+        if use_numpy:
+            values = base_value + draws  # type: ignore[operator]
+        else:
+            values = [base_value + float(val) for val in draws]  # type: ignore[call-overload]
+    elif mode in {"absolute", "target"}:
+        values = draws
+    else:
+        return None
+
+    bounds = spec.get("bounds")
+    if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+        lower, upper = bounds
+        if use_numpy:
+            if lower is not None:
+                values = np.maximum(values, float(lower))  # type: ignore[arg-type]
+            if upper is not None:
+                values = np.minimum(values, float(upper))  # type: ignore[arg-type]
+        else:
+            clipped: List[float] = []
+            for val in values:  # type: ignore[assignment]
+                v = float(val)
+                if lower is not None:
+                    v = max(float(lower), v)
+                if upper is not None:
+                    v = min(float(upper), v)
+                clipped.append(v)
+            values = clipped
+
+    if use_numpy:
+        return np.asarray(values, dtype=float)  # type: ignore[arg-type]
+    return [float(val) for val in values]  # type: ignore[return-value]
 
 
 def run_monte_carlo_analysis(
-    assumptions: Assumptions, iterations: int = 200
+    assumptions: Assumptions,
+    iterations: int = 200,
+    distributions: Optional[List[Dict[str, Any]]] = None,
+    seed: Optional[int] = 42,
 ) -> Dict[str, Any]:
-    rng = random.Random(42)
+    if iterations <= 0:
+        return {"summary": {"iterations": 0}, "samples": [], "settings": {"iterations": 0}}
+
+    if distributions is None:
+        distributions = load_monte_carlo_distributions()
+
+    rng_np = np.random.default_rng(seed) if np is not None else None
+    rng_py = random.Random(seed)
+    param_samples: Dict[str, Sequence[float]] = {}
+
+    for spec in distributions:
+        if not isinstance(spec, dict):
+            continue
+        parameter = spec.get("parameter")
+        if not parameter or not hasattr(assumptions, parameter):
+            continue
+        base_value = getattr(assumptions, parameter)
+        if not isinstance(base_value, (int, float)):
+            continue
+        values = _draw_samples(rng_np, rng_py, parameter, float(base_value), spec, iterations)
+        if values is None:
+            continue
+        param_samples[parameter] = values
+
     npv_results: List[float] = []
     irr_results: List[float] = []
     min_dscr_results: List[float] = []
     samples: List[Dict[str, float]] = []
 
-    for idx in range(1, iterations + 1):
-        varied = replace(
-            assumptions,
-            live_price_per_kg=assumptions.live_price_per_kg * rng.uniform(0.9, 1.1),
-            feed_cost_per_kg=assumptions.feed_cost_per_kg * rng.uniform(0.9, 1.1),
-            mortality_rate=max(
-                0.0, min(0.25, assumptions.mortality_rate + rng.uniform(-0.02, 0.02))
-            ),
-            price_growth=max(
-                -0.05, min(0.10, assumptions.price_growth + rng.uniform(-0.01, 0.03))
-            ),
-            cost_inflation=max(
-                0.0, min(0.05, assumptions.cost_inflation + rng.uniform(-0.005, 0.02))
-            ),
-        )
+    for idx in range(iterations):
+        overrides = {param: values[idx] for param, values in param_samples.items()}
+        varied = replace(assumptions, **overrides)
         evaluation = _evaluate_case_metrics(varied)["metrics"]
         npv_results.append(evaluation["npv"])
         irr_results.append(evaluation["irr"])
         min_dscr_results.append(evaluation["min_dscr"])
-        samples.append(
-            {
-                "iteration": idx,
-                "live_price_per_kg": varied.live_price_per_kg,
-                "feed_cost_per_kg": varied.feed_cost_per_kg,
-                "mortality_rate": varied.mortality_rate,
-                "price_growth": varied.price_growth,
-                "cost_inflation": varied.cost_inflation,
-                "npv": evaluation["npv"],
-                "irr": evaluation["irr"],
-                "min_dscr": evaluation["min_dscr"],
-            }
-        )
+        sample_entry = {"iteration": idx + 1, **overrides, "npv": evaluation["npv"], "irr": evaluation["irr"], "min_dscr": evaluation["min_dscr"]}
+        samples.append(sample_entry)
 
     summary = {
         "iterations": iterations,
@@ -326,15 +463,13 @@ def run_monte_carlo_analysis(
         if iterations
         else float("nan"),
         "mean_irr": float(sum(irr_results) / iterations) if iterations else float("nan"),
-        "mean_min_dscr": float(sum(min_dscr_results) / iterations)
-        if iterations
-        else float("nan"),
+        "mean_min_dscr": float(sum(min_dscr_results) / iterations) if iterations else float("nan"),
     }
 
     return {
         "summary": summary,
         "samples": samples,
-        "settings": {"iterations": iterations},
+        "settings": {"iterations": iterations, "seed": seed, "distributions": distributions},
     }
 
 
@@ -352,7 +487,16 @@ def break_even_analysis(
         totals[category] = totals.get(category, 0.0) + float(revenue)
 
     total_revenue = sum(totals.values())
-    total_cost = annual.total_cost
+    direct_costs: Dict[str, float] = {
+        "Broiler Revenue": float(
+            annual.feed_cost
+            + annual.chick_cost
+            + annual.processing_cost
+            + annual.health_cost
+        )
+    }
+    direct_pool = sum(direct_costs.values())
+    shared_cost_pool = max(0.0, float(annual.total_cost) - direct_pool)
 
     results: List[Dict[str, Any]] = []
     for category in REVENUE_CATEGORIES:
@@ -369,31 +513,51 @@ def break_even_analysis(
                 units += unit_float
             if price_float is not None:
                 price_values.append(price_float)
-        avg_price = (
-            (revenue / units)
-            if units
-            else (sum(price_values) / len(price_values) if price_values else float("nan"))
-        )
-        allocated_cost = (
-            total_cost * (revenue / total_revenue)
+
+        if units > 0 and revenue:
+            avg_price = revenue / units
+        elif price_values:
+            avg_price = sum(price_values) / len(price_values)
+        else:
+            avg_price = float("nan")
+
+        direct_cost = direct_costs.get(category, 0.0)
+        shared_cost = (
+            shared_cost_pool * (revenue / total_revenue)
             if total_revenue > 0 and revenue > 0
+            else 0.0
+        )
+        variable_cost_per_unit = (
+            direct_cost / units if units > 0 and direct_cost > 0 else 0.0
+        )
+        contribution_margin = (
+            avg_price - variable_cost_per_unit
+            if avg_price == avg_price
             else float("nan")
         )
         break_even_units = (
-            allocated_cost / avg_price if avg_price and avg_price == avg_price else float("nan")
+            shared_cost / contribution_margin
+            if contribution_margin and contribution_margin > 0
+            else float("nan")
         )
         break_even_price = (
-            allocated_cost / units if units and allocated_cost == allocated_cost else float("nan")
+            (direct_cost + shared_cost) / units if units > 0 else float("nan")
         )
+
         results.append(
             {
                 "Category": category,
                 "Annual revenue": revenue,
-                "Allocated cost": allocated_cost,
+                "Direct cost": direct_cost,
+                "Shared cost": shared_cost,
+                "Total cost": direct_cost + shared_cost,
+                "Variable cost per unit": variable_cost_per_unit if units > 0 else float("nan"),
+                "Contribution margin": contribution_margin,
                 "Break-even units": break_even_units,
                 "Break-even price": break_even_price,
             }
         )
+
     return results
 
 
@@ -613,7 +777,14 @@ def compute_advanced_analytics(
     revenue_summary: Dict[str, List[Dict[str, Any]]],
     revenue_schedules: Dict[str, List[Dict[str, Any]]],
     annual: AnnualSummary,
+    custom_simulation_definitions: Optional[List[Dict[str, Any]]] = None,
+    monte_carlo_distributions: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    if custom_simulation_definitions is None:
+        custom_simulation_definitions = load_custom_simulation_definitions()
+    if monte_carlo_distributions is None:
+        monte_carlo_distributions = load_monte_carlo_distributions()
+
     metrics: List[Dict[str, Any]] = []
 
     if income_statement:
@@ -765,7 +936,10 @@ def compute_advanced_analytics(
         "coverage": coverage_rows,
         "leverage": leverage_rows,
         "what_if": perform_what_if_analysis(assumptions, base_metrics),
-        "monte_carlo": run_monte_carlo_analysis(assumptions),
+        "monte_carlo": run_monte_carlo_analysis(
+            assumptions,
+            distributions=monte_carlo_distributions,
+        ),
         "break_even": break_even_analysis(annual, revenue_summary, revenue_schedules),
         "goal_seek": goal_seek_live_price(assumptions),
         "predictive": build_predictive_analytics(cashflows, income_statement),
@@ -775,7 +949,8 @@ def compute_advanced_analytics(
             annual.revenue,
         ),
         "custom_simulations": run_custom_simulations(
-            assumptions, base_metrics, DEFAULT_CUSTOM_SIMULATION_DEFINITIONS
+            assumptions, base_metrics, custom_simulation_definitions
         ),
+        "custom_simulation_definitions": custom_simulation_definitions,
         "base_metrics": base_metrics,
     }

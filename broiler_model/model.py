@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from .assumptions import Assumptions, build_assumptions_schedule
 from .production import (
@@ -27,13 +27,17 @@ from .financing import (
     irr,
 )
 from .analytics import compute_advanced_analytics
+from .config import (
+    load_custom_simulation_definitions,
+    load_monte_carlo_distributions,
+)
 
 
 def write_csv(path: Path, rows: Iterable[Dict[str, Any]]):
     rows = list(rows)
     if not rows:
         return
-    fieldnames = list(rows[0].keys())
+    fieldnames: List[str] = list({}.fromkeys(key for row in rows for key in row.keys()))
     with path.open("w", newline="") as fh:
         import csv
 
@@ -47,7 +51,14 @@ def write_json(path: Path, data: Any):
         json.dump(data, fh, indent=2)
 
 
-def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
+def generate_model_outputs(
+    assumptions: Assumptions,
+    *,
+    custom_simulation_path: Optional[Path] = None,
+    monte_carlo_config_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    custom_simulations = load_custom_simulation_definitions(custom_simulation_path)
+    monte_carlo_distributions = load_monte_carlo_distributions(monte_carlo_config_path)
     assumption_schedule = build_assumptions_schedule(assumptions)
     cycles = compute_cycles(assumptions)
     annual = annual_summary(assumptions, cycles)
@@ -67,6 +78,8 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
         revenue_summary,
         revenue_schedules,
         annual,
+        custom_simulation_definitions=custom_simulations,
+        monte_carlo_distributions=monte_carlo_distributions,
     )
 
     valuation_cashflows = [row.free_cash_flow for row in cashflows]

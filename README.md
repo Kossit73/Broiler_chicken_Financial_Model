@@ -40,6 +40,23 @@ python deployable_financial_model.py \
   --set price_growth=0.03 cost_inflation=0.02
 ```
 
+You can also point the CLI to alternative analytics configurations.  Provide a
+JSON file of custom scenario definitions via `--custom-simulations` and a JSON
+file of Monte Carlo distributions via `--monte-carlo-config`:
+
+```
+python deployable_financial_model.py \
+  --out outputs \
+  --custom-simulations configs/my_simulations.json \
+  --monte-carlo-config configs/monte_carlo_overrides.json
+```
+
+By default the CLI and Streamlit app load the reference configurations stored in
+`broiler_model/config/custom_simulations.json` and
+`broiler_model/config/monte_carlo_distributions.json`.  Editing those files (or
+providing alternates on the command line) lets you persist bespoke analytics
+setups outside the codebase.
+
 The command creates the `outputs/` directory (if needed) and writes:
 
 - `assumptions_summary.(csv|json)` – four-schedule table (Production,
@@ -62,10 +79,12 @@ The command creates the `outputs/` directory (if needed) and writes:
 - Advanced analytics exports – `advanced_metrics.csv`, `dscr_summary.csv`,
   `trend_analysis.csv`, `return_metrics.csv`, `coverage_metrics.csv`,
   `leverage_metrics.csv`, `what_if_analysis.csv`, `monte_carlo_summary.csv`,
-  `monte_carlo_samples.csv`, `break_even_analysis.csv`, `goal_seek_results.csv`,
-  `automated_forecast.csv`, `time_series_forecast.csv`, `risk_anomalies.csv`,
-  `ml_methods_summary.csv`, `scenario_planning.csv`,
-  `custom_simulation_definitions.csv`, and `custom_simulation_results.csv`
+  `monte_carlo_samples.csv`, `monte_carlo_distributions.csv`,
+  `break_even_analysis.csv`, `goal_seek_results.csv`, `automated_forecast.csv`,
+  `time_series_forecast.csv`, `risk_anomalies.csv`, `ml_methods_summary.csv`,
+  `scenario_planning.csv`, `custom_simulation_definitions.csv`,
+  `custom_simulation_results.csv`, `custom_simulation_invalid.csv`, and
+  `custom_simulation_delta_summary.csv`
   (plus consolidated `advanced_analytics.json`) so you can reuse the richer
   analytics outside the dashboard.
 - Revenue schedule CSVs for each category (`broiler_revenue_schedule.csv`,
@@ -116,9 +135,14 @@ refresh instantly. Below the metrics you will find three workspaces:
    automated/predictive forecasting (linear and AR(1) time-series), risk &
    anomaly detection, and ML method summaries with charts for DSCR, returns,
    coverage, leverage, and long-range revenue/EBITDA/net-income/free-cash-flow
-   trends. A **Simulation builder** lets you edit per-scenario rows (parameter,
-   change type, and magnitude) to run bespoke simulations directly in the
-   dashboard; the resulting table is exported via the CLI for offline analysis.
+   trends. Monte Carlo distributions are now editable from the UI and the engine
+   draws vectorised samples from the configured normal/lognormal/triangular
+   definitions, exporting the applied distributions alongside the summary.
+   Break-even schedules separate direct versus shared cost allocations to avoid
+   revenue-share distortions when unit economics differ across categories. A
+   **Simulation builder** validates per-scenario rows (parameter, change type,
+   magnitude), highlights invalid entries, and charts NPV deltas so analysts can
+   compare bespoke cases before exporting the resulting tables via the CLI.
 
 The Production & revenues tab includes an **Excel export** card—click *Prepare
 Excel Model* to generate a multi-sheet workbook and download it directly from

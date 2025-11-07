@@ -12,16 +12,21 @@ import pandas as pd
 import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
 
-from broiler_model.assumptions import (
-    Assumptions,
-    DEFAULT_CUSTOM_SIMULATION_DEFINITIONS,
-)
+from broiler_model.assumptions import Assumptions
 from broiler_model.analytics import (
     run_custom_simulations,
     run_monte_carlo_analysis,
 )
+from broiler_model.config import (
+    load_custom_simulation_definitions,
+    load_monte_carlo_distributions,
+)
 from broiler_model.model import generate_model_outputs
 from broiler_model.production import summarise_revenue_totals
+
+
+DEFAULT_CUSTOM_SIMULATION_DEFINITIONS = load_custom_simulation_definitions()
+DEFAULT_MONTE_CARLO_DISTRIBUTIONS = load_monte_carlo_distributions()
 
 
 def _payload_to_ai_settings(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1221,7 +1226,7 @@ def main() -> None:
     ml_methods_df = pd.DataFrame(predictive.get("ml_methods", []))
     scenario_df = pd.DataFrame(advanced.get("scenario_planning", []))
     custom_simulations_data = advanced.get("custom_simulations", {})
-    custom_definition_defaults = custom_simulations_data.get("definitions")
+    custom_definition_defaults = advanced.get("custom_simulation_definitions")
     if not custom_definition_defaults:
         custom_definition_defaults = copy.deepcopy(
             DEFAULT_CUSTOM_SIMULATION_DEFINITIONS
@@ -1419,18 +1424,18 @@ def main() -> None:
             if not custom_editor_df.empty
             else []
         )
+        simulation_inputs = custom_rows or copy.deepcopy(custom_definition_defaults)
         simulation_payload = run_custom_simulations(
             model.assumptions,
             base_metrics,
-            custom_rows,
+            simulation_inputs,
         )
         advanced["custom_simulations"] = simulation_payload
+        advanced["custom_simulation_definitions"] = copy.deepcopy(simulation_inputs)
         custom_state_store = st.session_state.setdefault("custom_simulation_state", {})
         scenario_store_custom = custom_state_store.setdefault(selected_scenario, {})
         schedule_state = scenario_store_custom.setdefault("custom_simulations", {})
-        schedule_state["data"] = copy.deepcopy(
-            simulation_payload.get("definitions", custom_rows)
-        )
+        schedule_state["data"] = copy.deepcopy(simulation_inputs)
         schedule_state.setdefault("default", copy.deepcopy(custom_defaults))
         custom_results_df = pd.DataFrame(simulation_payload.get("results", []))
         if custom_rows:
@@ -1441,12 +1446,32 @@ def main() -> None:
                     "Some rows were skipped because the parameter name or change value "
                     "could not be applied. Check the entries above and try again."
                 )
+        invalid_rows = simulation_payload.get("invalid", [])
+        if invalid_rows:
+            st.info(
+                "Rows with validation issues are retained above but excluded from the "
+                "simulation results."
+            )
+            invalid_df = pd.DataFrame(invalid_rows)
+            st.dataframe(
+                invalid_df,
+                use_container_width=True,
+                hide_index=True,
+            )
         if not custom_results_df.empty:
             st.dataframe(
                 custom_results_df,
                 use_container_width=True,
                 hide_index=True,
             )
+            delta_df = pd.DataFrame(simulation_payload.get("delta_summary", []))
+            if not delta_df.empty:
+                st.caption("NPV delta by custom scenario")
+                try:
+                    chart_series = delta_df.set_index("Scenario")["NPV Δ"].astype(float)
+                    st.bar_chart(chart_series)
+                except KeyError:
+                    pass
 
         if not what_if_df.empty:
             st.subheader("What-if analysis")
@@ -1472,7 +1497,9 @@ def main() -> None:
                 scenario_df.replace({pd.NA: None}).to_dict("records")
             )
 
-        monte_carlo_settings = monte_carlo.get("settings", {}) if isinstance(monte_carlo, dict) else {}
+        monte_carlo_settings = (
+            monte_carlo.get("settings", {}) if isinstance(monte_carlo, dict) else {}
+        )
         default_iterations = int(
             monte_carlo_settings.get("iterations")
             or (
@@ -1484,7 +1511,31 @@ def main() -> None:
         )
         default_iterations = min(max(default_iterations, 1), 10000)
 
+        distribution_defaults = monte_carlo_settings.get("distributions")
+        if not distribution_defaults:
+            distribution_defaults = copy.deepcopy(DEFAULT_MONTE_CARLO_DISTRIBUTIONS)
+        else:
+            distribution_defaults = copy.deepcopy(distribution_defaults)
+        distributions_df = pd.DataFrame(distribution_defaults)
+
         st.subheader("Monte Carlo simulation")
+        st.caption("Adjust parameter distributions before running simulations.")
+        distributions_df = _render_analytics_schedule(
+            "Monte Carlo distributions",
+            "monte_carlo_distributions",
+            distributions_df,
+            selected_scenario,
+            namespace=analytics_namespace,
+        )
+        distribution_records = (
+            distributions_df.replace({pd.NA: None}).to_dict("records")
+            if not distributions_df.empty
+            else []
+        )
+        if not distribution_records:
+            distribution_records = copy.deepcopy(DEFAULT_MONTE_CARLO_DISTRIBUTIONS)
+        monte_carlo_settings["distributions"] = copy.deepcopy(distribution_records)
+
         iterations_key = f"monte_carlo_iterations_{selected_scenario}"
         if iterations_key not in st.session_state:
             st.session_state[iterations_key] = default_iterations
@@ -1510,10 +1561,14 @@ def main() -> None:
                 updated_mc = run_monte_carlo_analysis(
                     model.assumptions,
                     iterations=iterations,
+                    distributions=distribution_records,
                 )
             monte_carlo = updated_mc
             advanced["monte_carlo"] = updated_mc
             results["advanced_analytics"]["monte_carlo"] = copy.deepcopy(updated_mc)
+            advanced["monte_carlo"].setdefault("settings", {})["distributions"] = (
+                copy.deepcopy(distribution_records)
+            )
             payload_cache = st.session_state.get("scenario_payloads", {})
             if selected_scenario in payload_cache:
                 payload_cache[selected_scenario]["results"]["advanced_analytics"][

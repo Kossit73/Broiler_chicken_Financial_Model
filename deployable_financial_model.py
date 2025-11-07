@@ -76,6 +76,9 @@ def _export_csv(
             output_dir / "monte_carlo_samples.csv",
             monte_carlo.get("samples", []),
         )
+        distributions = monte_carlo.get("settings", {}).get("distributions")
+        if isinstance(distributions, list) and distributions:
+            write_csv(output_dir / "monte_carlo_distributions.csv", distributions)
 
     write_csv(
         output_dir / "break_even_analysis.csv", advanced.get("break_even", [])
@@ -116,6 +119,14 @@ def _export_csv(
     write_csv(
         output_dir / "custom_simulation_results.csv",
         custom_simulations.get("results", []),
+    )
+    write_csv(
+        output_dir / "custom_simulation_invalid.csv",
+        custom_simulations.get("invalid", []),
+    )
+    write_csv(
+        output_dir / "custom_simulation_delta_summary.csv",
+        custom_simulations.get("delta_summary", []),
     )
 
     for category, rows in revenue_schedules.items():
@@ -209,6 +220,16 @@ def main() -> None:
         default=[],
         help="Override individual assumptions (repeat as needed)",
     )
+    parser.add_argument(
+        "--custom-simulations",
+        type=Path,
+        help="Optional JSON file defining custom simulation scenarios",
+    )
+    parser.add_argument(
+        "--monte-carlo-config",
+        type=Path,
+        help="Optional JSON file defining Monte Carlo distributions",
+    )
     args = parser.parse_args()
 
     if args.assumptions_file:
@@ -223,7 +244,11 @@ def main() -> None:
     output_dir = Path(args.out)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    results = generate_model_outputs(assumptions)
+    results = generate_model_outputs(
+        assumptions,
+        custom_simulation_path=args.custom_simulations,
+        monte_carlo_config_path=args.monte_carlo_config,
+    )
     _export_csv(output_dir, args.formats, assumptions, results)
     _export_json(output_dir, args.formats, assumptions, results)
 

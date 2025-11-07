@@ -1156,6 +1156,19 @@ def main() -> None:
     returns_df = pd.DataFrame(advanced.get("returns", []))
     coverage_df = pd.DataFrame(advanced.get("coverage", []))
     leverage_df = pd.DataFrame(advanced.get("leverage", []))
+    what_if_df = pd.DataFrame(advanced.get("what_if", []))
+    monte_carlo = advanced.get("monte_carlo", {})
+    monte_carlo_summary_df = pd.DataFrame([monte_carlo["summary"]]) if monte_carlo.get("summary") else pd.DataFrame()
+    monte_carlo_samples_df = pd.DataFrame(monte_carlo.get("samples", []))
+    break_even_df = pd.DataFrame(advanced.get("break_even", []))
+    goal_seek = advanced.get("goal_seek", {})
+    predictive = advanced.get("predictive", {})
+    forecast_df = pd.DataFrame(predictive.get("automated_forecast", []))
+    time_series_df = pd.DataFrame(predictive.get("time_series", {}).get("forecast", []))
+    risk_metadata = predictive.get("risk_anomalies", {})
+    risk_df = pd.DataFrame(risk_metadata.get("observations", []))
+    ml_methods_df = pd.DataFrame(predictive.get("ml_methods", []))
+    scenario_df = pd.DataFrame(advanced.get("scenario_planning", []))
 
     with production_tab:
         download_container = st.container()
@@ -1297,6 +1310,44 @@ def main() -> None:
         st.subheader("Advanced metrics")
         st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
+        if not what_if_df.empty:
+            st.subheader("What-if analysis")
+            st.dataframe(what_if_df, use_container_width=True, hide_index=True)
+
+        if not scenario_df.empty:
+            st.subheader("Scenario planning")
+            st.dataframe(scenario_df, use_container_width=True, hide_index=True)
+
+        if not monte_carlo_summary_df.empty:
+            st.subheader("Monte Carlo summary")
+            st.dataframe(
+                monte_carlo_summary_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+        if not monte_carlo_samples_df.empty:
+            st.caption("NPV distribution across Monte Carlo iterations")
+            try:
+                st.line_chart(
+                    monte_carlo_samples_df.set_index("iteration")["npv"],
+                )
+            except KeyError:
+                pass
+            st.dataframe(
+                monte_carlo_samples_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        if not break_even_df.empty:
+            st.subheader("Break-even analysis by product")
+            st.dataframe(break_even_df, use_container_width=True, hide_index=True)
+
+        if goal_seek:
+            st.subheader("Goal seek (target NPV)")
+            goal_df = pd.DataFrame([goal_seek])
+            st.dataframe(goal_df, use_container_width=True, hide_index=True)
+
         if not dscr_df.empty:
             st.subheader("Debt service coverage ratio")
             dscr_chart = dscr_df.set_index("year")
@@ -1338,6 +1389,38 @@ def main() -> None:
                 ["revenue", "ebitda", "net_income", "free_cash_flow"]
             ]
             st.line_chart(trend_chart)
+
+        if not forecast_df.empty:
+            st.subheader("Automated forecasting")
+            try:
+                st.line_chart(
+                    forecast_df.set_index("Year")[
+                        ["Revenue forecast", "EBITDA forecast"]
+                    ]
+                )
+            except KeyError:
+                pass
+            st.dataframe(forecast_df, use_container_width=True, hide_index=True)
+
+        if not time_series_df.empty:
+            st.subheader("Time series (AR(1)) outlook")
+            try:
+                st.line_chart(time_series_df.set_index("Year"))
+            except KeyError:
+                pass
+            st.dataframe(time_series_df, use_container_width=True, hide_index=True)
+
+        if not risk_df.empty:
+            st.subheader("Risk & anomaly detection")
+            st.caption(
+                f"Mean growth: {risk_metadata.get('mean_growth', float('nan')):.2%} — "
+                f"Std dev: {risk_metadata.get('std_growth', float('nan')):.2%}"
+            )
+            st.dataframe(risk_df, use_container_width=True, hide_index=True)
+
+        if not ml_methods_df.empty:
+            st.subheader("ML method diagnostics")
+            st.dataframe(ml_methods_df, use_container_width=True, hide_index=True)
 
     st.session_state.input_snapshot = copy.deepcopy(payload)
     scenario_store[selected_scenario] = payload

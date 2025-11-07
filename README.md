@@ -45,9 +45,14 @@ The command creates the `outputs/` directory (if needed) and writes:
 - `cash_flow_statement.(csv|json)` – three-section cash flow statement (operating,
   investing, financing) plus ending cash balances.
 - `loan_schedule.(csv|json)` – annual amortization table for the project debt.
-- `advanced_metrics.csv`, `dscr_summary.csv`, `trend_analysis.csv` (and
-  consolidated `advanced_analytics.json`) – KPI pack covering DSCR, payback, and
-  performance trend data points used in the dashboard analytics views.
+- Advanced analytics exports – `advanced_metrics.csv`, `dscr_summary.csv`,
+  `trend_analysis.csv`, `return_metrics.csv`, `coverage_metrics.csv`,
+  `leverage_metrics.csv`, `what_if_analysis.csv`, `monte_carlo_summary.csv`,
+  `monte_carlo_samples.csv`, `break_even_analysis.csv`, `goal_seek_results.csv`,
+  `automated_forecast.csv`, `time_series_forecast.csv`, `risk_anomalies.csv`,
+  `ml_methods_summary.csv`, and `scenario_planning.csv` (plus consolidated
+  `advanced_analytics.json`) so you can reuse the richer analytics outside the
+  dashboard.
 - Revenue schedule CSVs for each category (`broiler_revenue_schedule.csv`,
   `eggs_revenue_schedule.csv`, etc.) plus `revenue_schedules.json` capturing all
   five categories in one structure for downstream tooling.
@@ -89,8 +94,12 @@ refresh instantly. Below the metrics you will find three workspaces:
    sheet, cash flow statement, and debt amortization tables.
 3. **Advanced analytics** – surfaces KPIs (average margins, DSCR, payback,
    return-on-asset/equity/invested-capital averages, coverage ratios, and
-   leverage velocity) alongside line charts for DSCR, returns, coverage,
-   leverage, and long-range revenue/EBITDA/net-income/free-cash-flow trends.
+   leverage velocity) alongside interactive what-if tables, scenario planning,
+   Monte Carlo stress tests, product break-even and goal-seek diagnostics, plus
+   automated/predictive forecasting (linear and AR(1) time-series), risk &
+   anomaly detection, and ML method summaries with charts for DSCR, returns,
+   coverage, leverage, and long-range revenue/EBITDA/net-income/free-cash-flow
+   trends.
 
 The Production & revenues tab includes an **Excel export** card—click *Prepare
 Excel Model* to generate a multi-sheet workbook and download it directly from

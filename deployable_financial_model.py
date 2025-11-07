@@ -13,7 +13,8 @@ import argparse
 import csv
 import json
 import math
-from dataclasses import dataclass, asdict
+import random
+from dataclasses import dataclass, asdict, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -681,6 +682,539 @@ def build_financial_statements(
     }
 
 
+def _calculate_payback_period(cashflows: Iterable[CashFlowRow]) -> float:
+    cumulative = 0.0
+    previous = 0.0
+    payback = float("nan")
+    for row in cashflows:
+        cumulative += row.free_cash_flow
+        if row.year == 0:
+            previous = cumulative
+            continue
+        if cumulative >= 0 and payback != payback:
+            delta = cumulative - previous
+            if delta != 0:
+                fraction = (0 - previous) / delta
+                payback = (row.year - 1) + max(0.0, min(1.0, fraction))
+            else:
+                payback = float(row.year)
+            break
+        previous = cumulative
+    return payback
+
+
+def _compute_dscr_series(
+    cashflows: Iterable[CashFlowRow],
+) -> Tuple[List[Dict[str, float]], float, float]:
+    rows: List[Dict[str, float]] = []
+    values: List[float] = []
+    for row in cashflows:
+        if row.year == 0 or not row.debt_service:
+            continue
+        cash_available = row.operating_cash_flow + row.interest_expense
+        try:
+            dscr = cash_available / row.debt_service
+        except ZeroDivisionError:
+            dscr = float("nan")
+        rows.append({"year": row.year, "dscr": dscr})
+        if dscr == dscr:
+            values.append(dscr)
+    average = sum(values) / len(values) if values else float("nan")
+    minimum = min(values) if values else float("nan")
+    return rows, average, minimum
+
+
+def _percentile(data: List[float], percentile: float) -> float:
+    if not data:
+        return float("nan")
+    if percentile <= 0:
+        return float(sorted(data)[0])
+    if percentile >= 1:
+        return float(sorted(data)[-1])
+    ordered = sorted(data)
+    k = (len(ordered) - 1) * percentile
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return float(ordered[int(k)])
+    d0 = ordered[f] * (c - k)
+    d1 = ordered[c] * (k - f)
+    return float(d0 + d1)
+
+
+def _evaluate_case_metrics(
+    assumptions: Assumptions,
+    include_details: bool = False,
+) -> Dict[str, Any]:
+    cycles = compute_cycles(assumptions)
+    annual = annual_summary(assumptions, cycles)
+    cashflows, _ = discounted_cash_flow(assumptions, annual)
+    valuation_cashflows = [row.free_cash_flow for row in cashflows]
+    dscr_rows, avg_dscr, min_dscr = _compute_dscr_series(cashflows)
+    summary = {
+        "npv": npv(assumptions.discount_rate, valuation_cashflows),
+        "irr": irr(valuation_cashflows),
+        "payback": _calculate_payback_period(cashflows),
+        "avg_dscr": avg_dscr,
+        "min_dscr": min_dscr,
+        "terminal_cash": cashflows[-1].cumulative_cash if cashflows else float("nan"),
+    }
+    result: Dict[str, Any] = {"metrics": summary, "dscr_rows": dscr_rows}
+    if include_details:
+        result["cashflows"] = cashflows
+        result["annual"] = annual
+    return result
+
+
+def perform_what_if_analysis(
+    assumptions: Assumptions, base_metrics: Dict[str, float]
+) -> List[Dict[str, Any]]:
+    scenarios = [
+        {
+            "name": "Baseline",
+            "description": "Current assumptions",
+            "changes": {},
+        },
+        {
+            "name": "Live price +10%",
+            "description": "Increase live bird price per kg by 10%",
+            "changes": {
+                "live_price_per_kg": assumptions.live_price_per_kg * 1.10
+            },
+        },
+        {
+            "name": "Live price -10%",
+            "description": "Reduce live bird price per kg by 10%",
+            "changes": {
+                "live_price_per_kg": assumptions.live_price_per_kg * 0.90
+            },
+        },
+        {
+            "name": "Feed cost +10%",
+            "description": "Increase feed cost per kg by 10%",
+            "changes": {
+                "feed_cost_per_kg": assumptions.feed_cost_per_kg * 1.10
+            },
+        },
+        {
+            "name": "Feed cost -10%",
+            "description": "Reduce feed cost per kg by 10%",
+            "changes": {
+                "feed_cost_per_kg": assumptions.feed_cost_per_kg * 0.90
+            },
+        },
+        {
+            "name": "Mortality +2pp",
+            "description": "Increase mortality rate by 2 percentage points",
+            "changes": {
+                "mortality_rate": max(0.0, assumptions.mortality_rate + 0.02)
+            },
+        },
+        {
+            "name": "Mortality -2pp",
+            "description": "Decrease mortality rate by 2 percentage points",
+            "changes": {
+                "mortality_rate": max(0.0, assumptions.mortality_rate - 0.02)
+            },
+        },
+    ]
+
+    results: List[Dict[str, Any]] = []
+    for scenario in scenarios:
+        if scenario["name"] == "Baseline":
+            metrics = base_metrics
+        else:
+            mutated = replace(assumptions, **scenario["changes"])
+            metrics = _evaluate_case_metrics(mutated)["metrics"]
+        entry = {
+            "Scenario": scenario["name"],
+            "Description": scenario["description"],
+            "NPV": metrics["npv"],
+            "NPV Δ": metrics["npv"] - base_metrics["npv"],
+            "IRR": metrics["irr"],
+            "Avg DSCR": metrics["avg_dscr"],
+            "Min DSCR": metrics["min_dscr"],
+            "Payback": metrics["payback"],
+        }
+        results.append(entry)
+    return results
+
+
+def run_monte_carlo_analysis(
+    assumptions: Assumptions, iterations: int = 200
+) -> Dict[str, Any]:
+    rng = random.Random(42)
+    npv_results: List[float] = []
+    irr_results: List[float] = []
+    min_dscr_results: List[float] = []
+    samples: List[Dict[str, float]] = []
+
+    for idx in range(1, iterations + 1):
+        varied = replace(
+            assumptions,
+            live_price_per_kg=assumptions.live_price_per_kg
+            * rng.uniform(0.9, 1.1),
+            feed_cost_per_kg=assumptions.feed_cost_per_kg * rng.uniform(0.9, 1.1),
+            mortality_rate=max(
+                0.0, min(0.25, assumptions.mortality_rate + rng.uniform(-0.02, 0.02))
+            ),
+            price_growth=max(
+                -0.05, min(0.10, assumptions.price_growth + rng.uniform(-0.01, 0.03))
+            ),
+            cost_inflation=max(
+                0.0, min(0.05, assumptions.cost_inflation + rng.uniform(-0.005, 0.02))
+            ),
+        )
+        evaluation = _evaluate_case_metrics(varied)["metrics"]
+        npv_results.append(evaluation["npv"])
+        irr_results.append(evaluation["irr"])
+        min_dscr_results.append(evaluation["min_dscr"])
+        samples.append(
+            {
+                "iteration": idx,
+                "live_price_per_kg": varied.live_price_per_kg,
+                "feed_cost_per_kg": varied.feed_cost_per_kg,
+                "mortality_rate": varied.mortality_rate,
+                "price_growth": varied.price_growth,
+                "cost_inflation": varied.cost_inflation,
+                "npv": evaluation["npv"],
+                "irr": evaluation["irr"],
+                "min_dscr": evaluation["min_dscr"],
+            }
+        )
+
+    summary = {
+        "iterations": iterations,
+        "mean_npv": float(sum(npv_results) / iterations) if iterations else float("nan"),
+        "p5_npv": _percentile(npv_results, 0.05),
+        "p95_npv": _percentile(npv_results, 0.95),
+        "probability_negative_npv": float(
+            sum(1 for value in npv_results if value < 0) / iterations
+        )
+        if iterations
+        else float("nan"),
+        "mean_irr": float(sum(irr_results) / iterations) if iterations else float("nan"),
+        "mean_min_dscr": float(sum(min_dscr_results) / iterations)
+        if iterations
+        else float("nan"),
+    }
+
+    return {"summary": summary, "samples": samples}
+
+
+def break_even_analysis(
+    annual: AnnualSummary,
+    revenue_summary: Dict[str, List[Dict[str, Any]]],
+    revenue_schedules: Dict[str, List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    totals: Dict[str, float] = {}
+    for row in revenue_summary.get("by_category", []):
+        category = row.get("Category")
+        revenue = _to_float(row.get("Revenue"))
+        if category is None or revenue is None:
+            continue
+        totals[category] = totals.get(category, 0.0) + revenue
+
+    total_revenue = sum(totals.values())
+    total_cost = annual.total_cost
+
+    results: List[Dict[str, Any]] = []
+    for category in REVENUE_CATEGORIES:
+        schedule = revenue_schedules.get(category, [])
+        revenue = totals.get(category, 0.0)
+        units = 0.0
+        price_values: List[float] = []
+        for row in schedule:
+            unit_value = _to_float(row.get("Units"))
+            unit_price = _to_float(row.get("Unit price"))
+            if unit_value is not None:
+                units += unit_value
+            if unit_price is not None:
+                price_values.append(unit_price)
+        avg_price = (revenue / units) if units else (sum(price_values) / len(price_values) if price_values else float("nan"))
+        allocated_cost = (
+            total_cost * (revenue / total_revenue)
+            if total_revenue > 0 and revenue > 0
+            else float("nan")
+        )
+        break_even_units = (
+            allocated_cost / avg_price if avg_price and avg_price == avg_price else float("nan")
+        )
+        break_even_price = (
+            allocated_cost / units if units and allocated_cost == allocated_cost else float("nan")
+        )
+        results.append(
+            {
+                "Category": category,
+                "Annual revenue": revenue,
+                "Allocated cost": allocated_cost,
+                "Average unit price": avg_price,
+                "Total units": units if units else float("nan"),
+                "Break-even units": break_even_units,
+                "Break-even unit price": break_even_price,
+            }
+        )
+    return results
+
+
+def goal_seek_live_price(
+    assumptions: Assumptions,
+    target_npv: float = 0.0,
+    tolerance: float = 1_000.0,
+    max_iterations: int = 25,
+) -> Dict[str, Any]:
+    base_price = assumptions.live_price_per_kg
+    lower = base_price * 0.5
+    upper = base_price * 1.8
+    best_price = base_price
+    best_metrics = _evaluate_case_metrics(assumptions)["metrics"]
+    for _ in range(max_iterations):
+        candidate = (lower + upper) / 2
+        trial_assumptions = replace(assumptions, live_price_per_kg=candidate)
+        metrics = _evaluate_case_metrics(trial_assumptions)["metrics"]
+        difference = metrics["npv"] - target_npv
+        best_price = candidate
+        best_metrics = metrics
+        if abs(difference) <= tolerance:
+            status = "converged"
+            break
+        if difference > 0:
+            upper = candidate
+        else:
+            lower = candidate
+    else:
+        status = "max_iterations"
+    return {
+        "target": "NPV",
+        "target_value": target_npv,
+        "status": status,
+        "required_live_price_per_kg": best_price,
+        "resulting_npv": best_metrics.get("npv"),
+        "resulting_irr": best_metrics.get("irr"),
+        "resulting_avg_dscr": best_metrics.get("avg_dscr"),
+    }
+
+
+def _linear_regression(series: List[float]) -> Tuple[float, float]:
+    n = len(series)
+    if n < 2:
+        return 0.0, series[0] if series else 0.0
+    x = list(range(n))
+    sum_x = sum(x)
+    sum_y = sum(series)
+    sum_xy = sum(i * y for i, y in zip(x, series))
+    sum_x2 = sum(i * i for i in x)
+    denominator = n * sum_x2 - sum_x * sum_x
+    if denominator == 0:
+        slope = 0.0
+    else:
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+    intercept = (sum_y - slope * sum_x) / n
+    return slope, intercept
+
+
+def _forecast_linear(series: List[float], steps: int) -> List[float]:
+    slope, intercept = _linear_regression(series)
+    forecasts: List[float] = []
+    start = len(series)
+    for step in range(steps):
+        idx = start + step
+        forecasts.append(intercept + slope * idx)
+    return forecasts
+
+
+def _forecast_ar1(series: List[float], steps: int) -> List[float]:
+    n = len(series)
+    if n < 2:
+        return [series[-1] if series else 0.0] * steps
+    mean = sum(series) / n
+    num = sum((series[i - 1] - mean) * (series[i] - mean) for i in range(1, n))
+    den = sum((series[i - 1] - mean) ** 2 for i in range(1, n))
+    phi = num / den if den else 0.0
+    c = mean * (1 - phi)
+    forecasts: List[float] = []
+    prev = series[-1]
+    for _ in range(steps):
+        next_val = c + phi * prev
+        forecasts.append(next_val)
+        prev = next_val
+    return forecasts
+
+
+def build_predictive_analytics(
+    cashflows: List[CashFlowRow],
+    income_statement: List[IncomeStatementRow],
+    horizon: int = 5,
+) -> Dict[str, Any]:
+    historical_years = [row.year for row in cashflows if row.year > 0]
+    revenue_series = [row.revenue for row in cashflows if row.year > 0]
+    ebitda_series = [row.ebitda for row in cashflows if row.year > 0]
+    net_income_series = [row.net_income for row in cashflows if row.year > 0]
+
+    forecasts: List[Dict[str, float]] = []
+    if revenue_series:
+        revenue_forecast = _forecast_linear(revenue_series, horizon)
+        ebitda_forecast = _forecast_linear(ebitda_series, horizon)
+        net_income_forecast = _forecast_linear(net_income_series, horizon)
+        for idx in range(horizon):
+            year = (historical_years[-1] if historical_years else 0) + idx + 1
+            forecasts.append(
+                {
+                    "Year": year,
+                    "Revenue forecast": revenue_forecast[idx],
+                    "EBITDA forecast": ebitda_forecast[idx] if ebitda_series else float("nan"),
+                    "Net income forecast": net_income_forecast[idx]
+                    if net_income_series
+                    else float("nan"),
+                }
+            )
+
+    arima_forecast = _forecast_ar1(revenue_series, horizon) if revenue_series else []
+
+    growth_rates: List[float] = []
+    anomalies: List[Dict[str, Any]] = []
+    for idx in range(1, len(revenue_series)):
+        prev = revenue_series[idx - 1]
+        current = revenue_series[idx]
+        if prev:
+            growth = (current - prev) / prev
+            growth_rates.append(growth)
+    if growth_rates:
+        mean_growth = sum(growth_rates) / len(growth_rates)
+        variance = sum((g - mean_growth) ** 2 for g in growth_rates) / len(growth_rates)
+        std_dev = math.sqrt(variance)
+        for idx, growth in enumerate(growth_rates, start=1):
+            z = (growth - mean_growth) / std_dev if std_dev else 0.0
+            anomalies.append(
+                {
+                    "Year": historical_years[idx] if idx < len(historical_years) else idx,
+                    "Growth": growth,
+                    "Z-score": z,
+                    "Flag": abs(z) > 2.0,
+                }
+            )
+    else:
+        mean_growth = float("nan")
+        std_dev = float("nan")
+
+    ml_methods = []
+    if revenue_series:
+        slope, intercept = _linear_regression(revenue_series)
+        ml_methods.append(
+            {
+                "Method": "Linear regression",
+                "Slope": slope,
+                "Intercept": intercept,
+            }
+        )
+    if ebitda_series:
+        slope, intercept = _linear_regression(ebitda_series)
+        ml_methods.append(
+            {
+                "Method": "EBITDA trend regression",
+                "Slope": slope,
+                "Intercept": intercept,
+            }
+        )
+
+    time_series_analysis = {
+        "method": "AR(1)",
+        "forecast": [
+            {
+                "Year": (historical_years[-1] if historical_years else 0) + idx + 1,
+                "Revenue forecast": value,
+            }
+            for idx, value in enumerate(arima_forecast)
+        ],
+    }
+
+    risk_detection = {
+        "mean_growth": mean_growth,
+        "std_growth": std_dev,
+        "observations": anomalies,
+    }
+
+    return {
+        "automated_forecast": forecasts,
+        "time_series": time_series_analysis,
+        "risk_anomalies": risk_detection,
+        "ml_methods": ml_methods,
+    }
+
+
+def scenario_planning(
+    assumptions: Assumptions,
+    base_summary: Dict[str, float],
+    base_revenue: float,
+) -> List[Dict[str, Any]]:
+    scenarios = [
+        {
+            "name": "Baseline",
+            "changes": {},
+            "description": "Current assumption set",
+        },
+        {
+            "name": "Downside",
+            "changes": {
+                "live_price_per_kg": assumptions.live_price_per_kg * 0.92,
+                "feed_cost_per_kg": assumptions.feed_cost_per_kg * 1.08,
+                "mortality_rate": min(0.4, assumptions.mortality_rate + 0.03),
+            },
+            "description": "Price compression with higher feed and mortality",
+        },
+        {
+            "name": "Upside",
+            "changes": {
+                "live_price_per_kg": assumptions.live_price_per_kg * 1.08,
+                "feed_cost_per_kg": assumptions.feed_cost_per_kg * 0.95,
+                "mortality_rate": max(0.0, assumptions.mortality_rate - 0.02),
+            },
+            "description": "Pricing tailwinds and efficiency gains",
+        },
+        {
+            "name": "Expansion",
+            "changes": {
+                "cycles_per_year": assumptions.cycles_per_year + 1,
+                "birds_per_cycle": int(assumptions.birds_per_cycle * 1.05),
+            },
+            "description": "Add capacity through an extra cycle and larger placements",
+        },
+    ]
+
+    results: List[Dict[str, Any]] = [
+        {
+            "Scenario": "Baseline",
+            "Description": "Current assumption set",
+            "Revenue": base_revenue,
+            "NPV": base_summary["npv"],
+            "IRR": base_summary["irr"],
+            "Avg DSCR": base_summary["avg_dscr"],
+            "Payback": base_summary["payback"],
+            "NPV Δ": 0.0,
+        }
+    ]
+
+    for scenario in scenarios[1:]:
+        mutated = replace(assumptions, **scenario["changes"])
+        evaluation = _evaluate_case_metrics(mutated, include_details=True)
+        metrics = evaluation["metrics"]
+        annual = evaluation.get("annual")
+        revenue = annual.revenue if annual else float("nan")
+        results.append(
+            {
+                "Scenario": scenario["name"],
+                "Description": scenario["description"],
+                "Revenue": revenue,
+                "NPV": metrics["npv"],
+                "IRR": metrics["irr"],
+                "Avg DSCR": metrics["avg_dscr"],
+                "Payback": metrics["payback"],
+                "NPV Δ": metrics["npv"] - base_summary["npv"],
+            }
+        )
+    return results
+
+
 def _safe_div(numerator: float, denominator: float) -> float:
     try:
         if denominator is None:
@@ -704,9 +1238,13 @@ def _nanmean(values: Iterable[float]) -> float:
 
 
 def compute_advanced_analytics(
+    assumptions: Assumptions,
     cashflows: List[CashFlowRow],
     income_statement: List[IncomeStatementRow],
     balance_sheet: List[BalanceSheetRow],
+    revenue_summary: Dict[str, List[Dict[str, Any]]],
+    revenue_schedules: Dict[str, List[Dict[str, Any]]],
+    annual: AnnualSummary,
 ) -> Dict[str, Any]:
     metrics: List[Dict[str, Any]] = []
 
@@ -717,10 +1255,16 @@ def compute_advanced_analytics(
         avg_ebitda_margin = 0.0
         avg_net_margin = 0.0
 
-    dscr_rows: List[Dict[str, float]] = []
-    dscr_values: List[float] = []
-    cumulative = 0.0
-    payback = float("nan")
+    valuation_cashflows = [row.free_cash_flow for row in cashflows]
+    dscr_rows, avg_dscr, min_dscr = _compute_dscr_series(cashflows)
+    payback = _calculate_payback_period(cashflows)
+    base_metrics = {
+        "npv": npv(assumptions.discount_rate, valuation_cashflows),
+        "irr": irr(valuation_cashflows),
+        "avg_dscr": avg_dscr,
+        "min_dscr": min_dscr,
+        "payback": payback,
+    }
 
     income_by_year = {row.year: row for row in income_statement}
     balance_by_year = {row.year: row for row in balance_sheet}
@@ -730,28 +1274,11 @@ def compute_advanced_analytics(
     leverage_rows: List[Dict[str, float]] = []
 
     for row in cashflows:
-        cumulative += row.free_cash_flow
-        if payback != payback and cumulative >= 0 and row.year > 0:
-            prev_cumulative = cumulative - row.free_cash_flow
-            if row.free_cash_flow != 0:
-                fraction = (0 - prev_cumulative) / row.free_cash_flow
-                payback = (row.year - 1) + fraction
-            else:
-                payback = row.year
-
         if row.year == 0:
             continue
 
         income_row = income_by_year.get(row.year)
         balance_row = balance_by_year.get(row.year)
-
-        # Debt service coverage
-        if row.debt_service:
-            cash_available = row.operating_cash_flow + row.interest_expense
-            dscr = cash_available / row.debt_service if row.debt_service else float("nan")
-            dscr_rows.append({"year": row.year, "dscr": dscr})
-            if dscr == dscr:
-                dscr_values.append(dscr)
 
         # Returns analysis
         if income_row and balance_row:
@@ -804,9 +1331,6 @@ def compute_advanced_analytics(
             }
         )
 
-    avg_dscr = sum(dscr_values) / len(dscr_values) if dscr_values else float("nan")
-    min_dscr = min(dscr_values) if dscr_values else float("nan")
-
     metrics.extend(
         [
             {"metric": "Average EBITDA margin", "value": avg_ebitda_margin},
@@ -846,6 +1370,8 @@ def compute_advanced_analytics(
                 "metric": "Average debt paydown velocity",
                 "value": _nanmean(r["debt_paydown_velocity"] for r in coverage_rows),
             },
+            {"metric": "Base case NPV", "value": base_metrics["npv"]},
+            {"metric": "Base case IRR", "value": base_metrics["irr"]},
         ]
     )
 
@@ -869,6 +1395,16 @@ def compute_advanced_analytics(
         "returns": returns_rows,
         "coverage": coverage_rows,
         "leverage": leverage_rows,
+        "what_if": perform_what_if_analysis(assumptions, base_metrics),
+        "monte_carlo": run_monte_carlo_analysis(assumptions),
+        "break_even": break_even_analysis(annual, revenue_summary, revenue_schedules),
+        "goal_seek": goal_seek_live_price(assumptions),
+        "predictive": build_predictive_analytics(cashflows, income_statement),
+        "scenario_planning": scenario_planning(
+            assumptions,
+            base_metrics,
+            annual.revenue,
+        ),
     }
 
 
@@ -942,9 +1478,13 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
     )
     financials = build_financial_statements(assumptions, cashflows, loan_schedule)
     advanced = compute_advanced_analytics(
+        assumptions,
         cashflows,
         financials["income_statement"],
         financials["balance_sheet"],
+        revenue_summary,
+        revenue_schedules,
+        annual,
     )
 
     valuation_cashflows = [row.free_cash_flow for row in cashflows]
@@ -1016,6 +1556,46 @@ def main() -> None:
         write_csv(output_dir / "return_metrics.csv", advanced["returns"])
         write_csv(output_dir / "coverage_metrics.csv", advanced["coverage"])
         write_csv(output_dir / "leverage_metrics.csv", advanced["leverage"])
+        write_csv(output_dir / "what_if_analysis.csv", advanced.get("what_if", []))
+        monte_carlo = advanced.get("monte_carlo", {})
+        if monte_carlo:
+            summary_row = monte_carlo.get("summary")
+            if summary_row:
+                write_csv(
+                    output_dir / "monte_carlo_summary.csv",
+                    [summary_row],
+                )
+            write_csv(
+                output_dir / "monte_carlo_samples.csv",
+                monte_carlo.get("samples", []),
+            )
+        write_csv(
+            output_dir / "break_even_analysis.csv", advanced.get("break_even", [])
+        )
+        goal_seek = advanced.get("goal_seek")
+        if goal_seek:
+            write_csv(output_dir / "goal_seek_results.csv", [goal_seek])
+        predictive = advanced.get("predictive", {})
+        write_csv(
+            output_dir / "automated_forecast.csv",
+            predictive.get("automated_forecast", []),
+        )
+        write_csv(
+            output_dir / "time_series_forecast.csv",
+            predictive.get("time_series", {}).get("forecast", []),
+        )
+        write_csv(
+            output_dir / "risk_anomalies.csv",
+            predictive.get("risk_anomalies", {}).get("observations", []),
+        )
+        write_csv(
+            output_dir / "ml_methods_summary.csv",
+            predictive.get("ml_methods", []),
+        )
+        write_csv(
+            output_dir / "scenario_planning.csv",
+            advanced.get("scenario_planning", []),
+        )
         for category, rows in revenue_schedules.items():
             safe = (
                 category.lower()

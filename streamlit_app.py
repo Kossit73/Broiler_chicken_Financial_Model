@@ -430,14 +430,6 @@ def _render_row_editors(
                     )
                     if column in updated_df.columns:
                         updated_df.at[idx, column] = coerced
-                    display = ""
-                    if coerced is None:
-                        display = ""
-                    elif isinstance(coerced, float) and pd.isna(coerced):
-                        display = ""
-                    else:
-                        display = str(coerced)
-                    st.session_state[widget_key] = display
                 for column, value in fixed_columns.items():
                     if column in updated_df.columns:
                         updated_df.at[idx, column] = value

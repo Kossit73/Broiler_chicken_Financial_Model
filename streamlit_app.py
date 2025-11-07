@@ -758,6 +758,13 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         [
             {"attr": "cycles_per_year", "label": "Cycles per year", "min": 1, "max": 12, "type": "int"},
             {
+                "attr": "production_horizon_years",
+                "label": "Production horizon (years)",
+                "min": 1,
+                "max": 40,
+                "type": "int",
+            },
+            {
                 "attr": "birds_per_cycle",
                 "label": "Birds per cycle",
                 "min": 1000,
@@ -1023,6 +1030,7 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
     return Assumptions(
         farm_name=farm_name,
         cycles_per_year=int(values["cycles_per_year"]),
+        production_horizon_years=int(values["production_horizon_years"]),
         birds_per_cycle=int(values["birds_per_cycle"]),
         mortality_rate=float(values["mortality_rate"]),
         final_weight_kg=float(values["final_weight_kg"]),

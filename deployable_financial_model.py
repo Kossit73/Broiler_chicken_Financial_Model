@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Broiler chicken financial model without external dependencies.
 
-This script codifies a 10-year broiler chicken production and financing model
-using only the Python standard library.  It captures production assumptions,
+This script codifies a broiler chicken production and financing model using
+only the Python standard library.  It captures production assumptions,
 per-cycle economics, annual rollups, debt service, free cash flow, and
-valuation metrics (NPV/IRR).  Results can be exported as CSV and/or JSON files.
+valuation metrics (NPV/IRR) across a configurable planning horizon.  Results
+can be exported as CSV and/or JSON files.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 class Assumptions:
     farm_name: str = "Baseline Broiler Farm"
     cycles_per_year: int = 6
+    production_horizon_years: int = 10
     birds_per_cycle: int = 20000
     mortality_rate: float = 0.05
     final_weight_kg: float = 2.5
@@ -61,6 +63,7 @@ class Assumptions:
 ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Production", "Farm name", "farm_name"),
     ("Production", "Cycles per year", "cycles_per_year"),
+    ("Production", "Production horizon (years)", "production_horizon_years"),
     ("Production", "Birds placed per cycle", "birds_per_cycle"),
     ("Production", "Mortality rate", "mortality_rate"),
     ("Production", "Final weight (kg)", "final_weight_kg"),
@@ -339,7 +342,9 @@ def build_revenue_schedules(
 
 
 def summarise_revenue_totals(
-    revenue_schedules: Dict[str, List[Dict[str, Any]]], cycles_per_year: int
+    revenue_schedules: Dict[str, List[Dict[str, Any]]],
+    cycles_per_year: int,
+    projection_years: int,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Aggregate revenue schedules into annual totals per category and overall.
 
@@ -353,6 +358,8 @@ def summarise_revenue_totals(
     per_year_totals: Dict[int, float] = {}
     cycles = int(cycles_per_year) if cycles_per_year else 0
     cycles = max(cycles, 1)
+    years = int(projection_years) if projection_years else 0
+    years = max(years, 1)
 
     for category, rows in revenue_schedules.items():
         if not rows:
@@ -385,10 +392,12 @@ def summarise_revenue_totals(
             )
             per_year_totals[year] = per_year_totals.get(year, 0.0) + total_float
 
-    annual_totals = [
-        {"Year": int(year), "Revenue": float(total)}
-        for year, total in sorted(per_year_totals.items())
-    ]
+    annual_totals: List[Dict[str, Any]] = []
+    max_year = max(per_year_totals.keys(), default=0)
+    horizon = max(years, max_year)
+    for year in range(1, horizon + 1):
+        total = per_year_totals.get(year, 0.0)
+        annual_totals.append({"Year": year, "Revenue": float(total)})
 
     return {"by_category": per_category, "annual_totals": annual_totals}
 
@@ -500,7 +509,11 @@ def discounted_cash_flow(
         )
     )
 
-    for year in range(1, 11):
+    projection_years = int(assumptions.production_horizon_years)
+    if projection_years <= 0:
+        projection_years = 1
+
+    for year in range(1, projection_years + 1):
         revenue *= (1 + assumptions.price_growth)
         variable_costs = (
             base_annual.feed_cost
@@ -1474,7 +1487,9 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
     cashflows, loan_schedule = discounted_cash_flow(assumptions, annual)
     revenue_schedules = build_revenue_schedules(assumptions, cycles)
     revenue_summary = summarise_revenue_totals(
-        revenue_schedules, assumptions.cycles_per_year
+        revenue_schedules,
+        assumptions.cycles_per_year,
+        assumptions.production_horizon_years,
     )
     financials = build_financial_statements(assumptions, cashflows, loan_schedule)
     advanced = compute_advanced_analytics(
@@ -1636,6 +1651,7 @@ def main() -> None:
         output_dir / "manifest.json",
         {
             "cycles_per_year": assumptions.cycles_per_year,
+            "production_horizon_years": assumptions.production_horizon_years,
             "years": len(cashflows) - 1,
             "files": sorted(p.name for p in output_dir.iterdir() if p.is_file()),
         },

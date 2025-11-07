@@ -3,9 +3,10 @@
 This repository contains a fully scripted broiler chicken financial model that
 runs without Excel or third-party Python dependencies.  The model codifies key
 production assumptions, per-cycle economics, annual rollups, debt service, and
-10-year discounted cash flow valuation metrics.  Results can be exported to CSV
-and/or JSON for further analysis.  An optional Streamlit dashboard lets you
-interactively explore the assumptions and outputs.
+discounted cash flow valuation metrics across a configurable production
+horizon.  Results can be exported to CSV and/or JSON for further analysis.  An
+optional Streamlit dashboard lets you interactively explore the assumptions and
+outputs.
 
 ## Contents
 
@@ -36,12 +37,12 @@ The command creates the `outputs/` directory (if needed) and writes:
   cycle within a year.
 - `annual_summary.(csv|json)` – aggregated annual revenue, cost, and EBITDA
   metrics.
-- `cash_flow.(csv|json)` – 10-year cash flow projections with operating cash
-  flow, maintenance capex, debt service, and discounted values.
-- `income_statement.(csv|json)` – modeled 10-year income statement with revenue,
-  COGS, EBITDA, taxes, and net income.
+- `cash_flow.(csv|json)` – cash flow projections for the configured horizon with
+  operating cash flow, maintenance capex, debt service, and discounted values.
+- `income_statement.(csv|json)` – modeled multi-year income statement with
+  revenue, COGS, EBITDA, taxes, and net income matching the selected horizon.
 - `balance_sheet.(csv|json)` – simplified balance sheet highlighting cash,
-  working capital, net PP&E, debt, and equity movements.
+  working capital, net PP&E, debt, and equity movements across the horizon.
 - `cash_flow_statement.(csv|json)` – three-section cash flow statement (operating,
   investing, financing) plus ending cash balances.
 - `loan_schedule.(csv|json)` – annual amortization table for the project debt.
@@ -60,7 +61,8 @@ The command creates the `outputs/` directory (if needed) and writes:
   `revenue_summary.json` – Year-by-year revenue totals ensuring annual figures
   tie directly to the summed cycle-level schedules.
 - `valuation.json` – NPV/IRR results using the modeled cash flows.
-- `manifest.json` – convenience listing of the generated files.
+- `manifest.json` – convenience listing of the generated files plus the cycles
+  per year and production horizon captured in the run.
 
 All values are expressed in US dollars except where otherwise noted.  Adjust the
 `Assumptions` dataclass in `deployable_financial_model.py` to model different

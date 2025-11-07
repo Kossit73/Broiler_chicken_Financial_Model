@@ -11,6 +11,9 @@ outputs.
 ## Contents
 
 - `deployable_financial_model.py` – CLI that generates the model outputs.
+- `broiler_model/` – Python package containing the assumptions, production,
+  financing, analytics, and orchestration modules used by both the CLI and the
+  Streamlit app.
 - `streamlit_app.py` – Streamlit UI that wraps the same model logic.
 - `revenue_schedules_builder.py` – optional Excel helper that extracts or
   templates detailed revenue schedules by category.
@@ -25,6 +28,16 @@ outputs.
 
 ```bash
 python deployable_financial_model.py --out outputs --formats csv json
+```
+
+You can also feed custom assumptions either from a JSON/YAML file or by passing
+individual overrides on the command line:
+
+```bash
+python deployable_financial_model.py \
+  --out outputs \
+  --assumptions-file my_assumptions.json \
+  --set price_growth=0.03 cost_inflation=0.02
 ```
 
 The command creates the `outputs/` directory (if needed) and writes:
@@ -66,8 +79,9 @@ The command creates the `outputs/` directory (if needed) and writes:
   per year and production horizon captured in the run.
 
 All values are expressed in US dollars except where otherwise noted.  Adjust the
-`Assumptions` dataclass in `deployable_financial_model.py` to model different
-operations (e.g., number of birds, pricing, debt structure, or cost inflation).
+`Assumptions` dataclass in `broiler_model/assumptions.py` (or load a customised
+JSON/YAML file via the CLI) to model different operations—number of birds,
+pricing, debt structure, inflation, and more.
 
 ## Interactive dashboard (optional)
 

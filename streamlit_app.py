@@ -12,14 +12,16 @@ import pandas as pd
 import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
 
-from deployable_financial_model import (
+from broiler_model.assumptions import (
     Assumptions,
     DEFAULT_CUSTOM_SIMULATION_DEFINITIONS,
-    generate_model_outputs,
-    run_monte_carlo_analysis,
-    run_custom_simulations,
-    summarise_revenue_totals,
 )
+from broiler_model.analytics import (
+    run_custom_simulations,
+    run_monte_carlo_analysis,
+)
+from broiler_model.model import generate_model_outputs
+from broiler_model.production import summarise_revenue_totals
 
 
 def _payload_to_ai_settings(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:

@@ -1127,7 +1127,9 @@ def main() -> None:
     revenue_summary = results.get(
         "revenue_summary",
         summarise_revenue_totals(
-            revenue_schedules, model.assumptions.cycles_per_year
+            revenue_schedules,
+            model.assumptions.cycles_per_year,
+            model.assumptions.production_horizon_years,
         ),
     )
     financials = results["financial_statements"]
@@ -1285,7 +1287,9 @@ def main() -> None:
             revenue_schedules = updated_revenue
             results["revenue_schedules"] = updated_revenue
             revenue_summary = summarise_revenue_totals(
-                revenue_schedules, model.assumptions.cycles_per_year
+                revenue_schedules,
+                model.assumptions.cycles_per_year,
+                model.assumptions.production_horizon_years,
             )
             results["revenue_summary"] = revenue_summary
 

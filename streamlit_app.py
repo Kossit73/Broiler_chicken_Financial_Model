@@ -468,6 +468,9 @@ def _render_row_edit_form(
 
     new_df = df.copy()
     for column, raw_value in inputs.items():
+        series = new_df[column]
+        if pd.api.types.is_string_dtype(series):
+            new_df[column] = series.astype(object)
         new_df.at[idx, column] = _coerce_editor_input(raw_value)
     st.success(f"Row {idx + 1} updated.")
     return new_df, True

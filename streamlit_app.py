@@ -8,7 +8,7 @@ from io import BytesIO
 import json
 import math
 import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, get_type_hints
 
 import pandas as pd
 import streamlit as st
@@ -38,9 +38,12 @@ ROW_EDIT_COLUMN = "Edit row"
 _ASSUMPTION_LABEL_TO_KEY = {
     label: key for _, label, key in ASSUMPTION_SCHEDULE_LAYOUT
 }
-_ASSUMPTION_FIELD_TYPES = {
-    name: field.type for name, field in Assumptions.__dataclass_fields__.items()
-}
+try:
+    _ASSUMPTION_FIELD_TYPES = get_type_hints(Assumptions)
+except Exception:  # pragma: no cover - defensive fallback
+    _ASSUMPTION_FIELD_TYPES = {
+        name: field.type for name, field in Assumptions.__dataclass_fields__.items()
+    }
 
 
 def _payload_to_ai_settings(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:

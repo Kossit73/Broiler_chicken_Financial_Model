@@ -757,6 +757,8 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
             st.markdown(f"### {title}")
             cols = st.columns(columns)
             for idx, field in enumerate(fields):
+                if idx % columns == 0 and idx != 0:
+                    cols = st.columns(columns)
                 col = cols[idx % columns]
                 attr = field["attr"]
                 label = field["label"]

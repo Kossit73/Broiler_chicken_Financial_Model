@@ -32,6 +32,7 @@ DEFAULT_MONTE_CARLO_DISTRIBUTIONS = load_monte_carlo_distributions()
 
 
 ROW_REMOVAL_COLUMN = "Remove row"
+ROW_EDIT_COLUMN = "Edit row"
 
 
 def _payload_to_ai_settings(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -324,6 +325,8 @@ def _add_schedule_row(
                 new_row[column] = value
     if ROW_REMOVAL_COLUMN in new_row:
         new_row[ROW_REMOVAL_COLUMN] = False
+    if ROW_EDIT_COLUMN in new_row:
+        new_row[ROW_EDIT_COLUMN] = False
     return pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
 
@@ -416,6 +419,58 @@ def _parse_iterable_value(value: Any) -> Any:
             parsed = parsed_parts
         return parsed
     return value
+
+
+def _coerce_editor_input(value: str) -> Any:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "":
+        return None
+    try:
+        if re.fullmatch(r"[-+]?\d+", text):
+            return int(text)
+        return float(text)
+    except ValueError:
+        return text
+
+
+def _render_row_edit_form(
+    df: pd.DataFrame,
+    idx: int,
+    fixed_columns: Optional[Dict[str, Any]],
+    namespace: str,
+    schedule_key: str,
+    scenario: str,
+) -> Tuple[pd.DataFrame, bool]:
+    fixed_columns = fixed_columns or {}
+    editable_columns = [
+        column
+        for column in df.columns
+        if column not in {ROW_REMOVAL_COLUMN, ROW_EDIT_COLUMN}
+        and column not in fixed_columns
+    ]
+    if not editable_columns:
+        return df, False
+
+    form_key = f"edit_row_form_{namespace}_{schedule_key}_{scenario}_{idx}"
+    with st.form(form_key):
+        st.markdown(f"**Editing row {idx + 1}**")
+        inputs: Dict[str, str] = {}
+        for column in editable_columns:
+            current_value = df.at[idx, column]
+            default_text = "" if pd.isna(current_value) else str(current_value)
+            inputs[column] = st.text_input(column, value=default_text)
+        submitted = st.form_submit_button("Save row")
+
+    if not submitted:
+        return df, False
+
+    new_df = df.copy()
+    for column, raw_value in inputs.items():
+        new_df.at[idx, column] = _coerce_editor_input(raw_value)
+    st.success(f"Row {idx + 1} updated.")
+    return new_df, True
 
 
 def _parse_iterable_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
@@ -543,7 +598,11 @@ def _render_schedule_editor(
     st.markdown(f"**{title}**")
     df, state = _initialise_schedule_state(namespace, scenario, schedule_key, default_rows)
     df = df.convert_dtypes()
-    original_columns = [col for col in df.columns if col != ROW_REMOVAL_COLUMN]
+    original_columns = [
+        col
+        for col in df.columns
+        if col not in {ROW_REMOVAL_COLUMN, ROW_EDIT_COLUMN}
+    ]
 
     fixed_columns = fixed_columns or {}
     row_defaults = row_defaults or {}
@@ -560,6 +619,8 @@ def _render_schedule_editor(
     if edit_enabled:
         if ROW_REMOVAL_COLUMN not in df.columns:
             df[ROW_REMOVAL_COLUMN] = False
+        if ROW_EDIT_COLUMN not in df.columns:
+            df[ROW_EDIT_COLUMN] = False
         controls = st.columns(2)
         if controls[0].button(
             "Add row",
@@ -614,6 +675,8 @@ def _render_schedule_editor(
     else:
         if ROW_REMOVAL_COLUMN in df.columns:
             df = df.drop(columns=[ROW_REMOVAL_COLUMN])
+        if ROW_EDIT_COLUMN in df.columns:
+            df = df.drop(columns=[ROW_EDIT_COLUMN])
         st.caption("Enable editing to modify this schedule. Current values remain read-only.")
 
     if (operation_applied and auto_update_revenue) or (auto_update_revenue and edit_enabled):
@@ -626,13 +689,23 @@ def _render_schedule_editor(
         disabled=not edit_enabled,
         fixed=fixed_columns,
     )
+    instructions: List[str] = []
+    if edit_enabled and ROW_EDIT_COLUMN in df.columns:
+        column_config[ROW_EDIT_COLUMN] = st.column_config.ButtonColumn(
+            "Edit",
+            help="Open an inline form to edit this row's values.",
+            width="small",
+        )
+        instructions.append("Click 'Edit' to open the row editor and save updates below.")
     if edit_enabled and ROW_REMOVAL_COLUMN in df.columns:
         column_config[ROW_REMOVAL_COLUMN] = st.column_config.CheckboxColumn(
             "Remove",
             help="Tick to remove this row when saving edits.",
             disabled=False,
         )
-        st.caption("Use the 'Remove' checkbox within the schedule to delete specific rows.")
+        instructions.append("Use the 'Remove' checkbox to delete the row before saving.")
+    if instructions:
+        st.caption(" ".join(instructions))
 
     edited_df = st.data_editor(
         df,
@@ -645,11 +718,30 @@ def _render_schedule_editor(
     )
 
     edited_df = pd.DataFrame(edited_df)
+    row_form_applied = False
+    if ROW_EDIT_COLUMN in edited_df.columns:
+        edit_mask = edited_df[ROW_EDIT_COLUMN].fillna(False)
+        edit_indices = [idx for idx, flag in enumerate(edit_mask) if flag]
+        for row_idx in edit_indices:
+            edited_df, submitted = _render_row_edit_form(
+                edited_df,
+                row_idx,
+                fixed_columns,
+                namespace,
+                schedule_key,
+                scenario,
+            )
+            row_form_applied = row_form_applied or submitted
+        edited_df[ROW_EDIT_COLUMN] = False
     if ROW_REMOVAL_COLUMN in edited_df.columns:
         remove_mask = edited_df[ROW_REMOVAL_COLUMN].fillna(False)
         if remove_mask.any():
             edited_df = edited_df.loc[~remove_mask].reset_index(drop=True)
         edited_df = edited_df.drop(columns=[ROW_REMOVAL_COLUMN])
+    if ROW_EDIT_COLUMN in edited_df.columns:
+        edited_df = edited_df.drop(columns=[ROW_EDIT_COLUMN])
+    if row_form_applied:
+        operation_applied = True
     if auto_update_revenue:
         edited_df = _auto_compute_revenue(edited_df)
     edited_df = _ensure_fixed_columns(edited_df, fixed_columns)

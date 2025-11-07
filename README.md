@@ -87,9 +87,10 @@ refresh instantly. Below the metrics you will find three workspaces:
    asset schedules.
 2. **Financial statements** – exposes the modeled income statement, balance
    sheet, cash flow statement, and debt amortization tables.
-3. **Advanced analytics** – surfaces KPIs (average margins, DSCR, payback) and
-   line charts for DSCR and long-range revenue/EBITDA/net-income/free-cash-flow
-   trends.
+3. **Advanced analytics** – surfaces KPIs (average margins, DSCR, payback,
+   return-on-asset/equity/invested-capital averages, coverage ratios, and
+   leverage velocity) alongside line charts for DSCR, returns, coverage,
+   leverage, and long-range revenue/EBITDA/net-income/free-cash-flow trends.
 
 The Production & revenues tab includes an **Excel export** card—click *Prepare
 Excel Model* to generate a multi-sheet workbook and download it directly from

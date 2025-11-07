@@ -1153,6 +1153,9 @@ def main() -> None:
     metrics_df = pd.DataFrame(advanced["metrics"])
     dscr_df = pd.DataFrame(advanced["dscr"])
     trend_df = pd.DataFrame(advanced["trend"])
+    returns_df = pd.DataFrame(advanced.get("returns", []))
+    coverage_df = pd.DataFrame(advanced.get("coverage", []))
+    leverage_df = pd.DataFrame(advanced.get("leverage", []))
 
     with production_tab:
         download_container = st.container()
@@ -1298,6 +1301,36 @@ def main() -> None:
             st.subheader("Debt service coverage ratio")
             dscr_chart = dscr_df.set_index("year")
             st.line_chart(dscr_chart)
+
+        if not returns_df.empty:
+            st.subheader("Return diagnostics")
+            returns_chart = returns_df.set_index("year")
+            st.line_chart(
+                returns_chart[[
+                    "return_on_assets",
+                    "return_on_equity",
+                    "return_on_invested_capital",
+                ]]
+            )
+            st.dataframe(returns_df, use_container_width=True, hide_index=True)
+
+        if not coverage_df.empty:
+            st.subheader("Coverage & resilience")
+            coverage_chart = coverage_df.set_index("year")
+            st.line_chart(
+                coverage_chart[[
+                    "interest_coverage",
+                    "fcf_to_debt_service",
+                    "maintenance_capex_coverage",
+                ]]
+            )
+            st.dataframe(coverage_df, use_container_width=True, hide_index=True)
+
+        if not leverage_df.empty:
+            st.subheader("Leverage profile")
+            leverage_chart = leverage_df.set_index("year")
+            st.line_chart(leverage_chart[["debt_to_equity", "debt_ratio"]])
+            st.dataframe(leverage_df, use_container_width=True, hide_index=True)
 
         if not trend_df.empty:
             st.subheader("Performance trends")

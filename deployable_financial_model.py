@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -680,9 +681,32 @@ def build_financial_statements(
     }
 
 
+def _safe_div(numerator: float, denominator: float) -> float:
+    try:
+        if denominator is None:
+            return float("nan")
+        denom = float(denominator)
+    except (TypeError, ValueError):
+        return float("nan")
+    if denom == 0 or math.isnan(denom):
+        return float("nan")
+    try:
+        return float(numerator) / denom
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _nanmean(values: Iterable[float]) -> float:
+    data = [float(v) for v in values if isinstance(v, (int, float)) and v == v]
+    if not data:
+        return float("nan")
+    return sum(data) / len(data)
+
+
 def compute_advanced_analytics(
     cashflows: List[CashFlowRow],
     income_statement: List[IncomeStatementRow],
+    balance_sheet: List[BalanceSheetRow],
 ) -> Dict[str, Any]:
     metrics: List[Dict[str, Any]] = []
 
@@ -698,6 +722,13 @@ def compute_advanced_analytics(
     cumulative = 0.0
     payback = float("nan")
 
+    income_by_year = {row.year: row for row in income_statement}
+    balance_by_year = {row.year: row for row in balance_sheet}
+
+    returns_rows: List[Dict[str, float]] = []
+    coverage_rows: List[Dict[str, float]] = []
+    leverage_rows: List[Dict[str, float]] = []
+
     for row in cashflows:
         cumulative += row.free_cash_flow
         if payback != payback and cumulative >= 0 and row.year > 0:
@@ -708,14 +739,70 @@ def compute_advanced_analytics(
             else:
                 payback = row.year
 
-        if row.year == 0 or row.debt_service == 0:
+        if row.year == 0:
             continue
 
-        cash_available = row.operating_cash_flow + row.interest_expense
-        dscr = cash_available / row.debt_service if row.debt_service else float("nan")
-        dscr_rows.append({"year": row.year, "dscr": dscr})
-        if dscr == dscr:
-            dscr_values.append(dscr)
+        income_row = income_by_year.get(row.year)
+        balance_row = balance_by_year.get(row.year)
+
+        # Debt service coverage
+        if row.debt_service:
+            cash_available = row.operating_cash_flow + row.interest_expense
+            dscr = cash_available / row.debt_service if row.debt_service else float("nan")
+            dscr_rows.append({"year": row.year, "dscr": dscr})
+            if dscr == dscr:
+                dscr_values.append(dscr)
+
+        # Returns analysis
+        if income_row and balance_row:
+            roa = _safe_div(income_row.net_income, balance_row.total_assets)
+            roe = _safe_div(income_row.net_income, balance_row.equity)
+            invested_capital = (
+                (balance_row.debt or 0.0)
+                + (balance_row.equity or 0.0)
+                - (balance_row.cash or 0.0)
+            )
+            nopat = (income_row.net_income or 0.0) + (income_row.interest or 0.0)
+            roic = _safe_div(nopat, invested_capital)
+            returns_rows.append(
+                {
+                    "year": row.year,
+                    "return_on_assets": roa,
+                    "return_on_equity": roe,
+                    "return_on_invested_capital": roic,
+                }
+            )
+
+            debt_to_equity = balance_row.debt_to_equity
+            debt_ratio = _safe_div(balance_row.debt, balance_row.total_assets)
+            leverage_rows.append(
+                {
+                    "year": row.year,
+                    "debt_to_equity": debt_to_equity,
+                    "debt_ratio": debt_ratio,
+                    "ending_debt": row.ending_debt,
+                }
+            )
+
+        interest_coverage = float("nan")
+        if income_row:
+            interest_coverage = _safe_div(income_row.ebit, income_row.interest)
+
+        fcf_to_debt_service = _safe_div(row.free_cash_flow, row.debt_service)
+        maintenance_cov = _safe_div(
+            row.operating_cash_flow, row.maintenance_capex
+        )
+        opening_debt = (row.ending_debt or 0.0) + (row.principal_payment or 0.0)
+        paydown_velocity = _safe_div(row.principal_payment, opening_debt)
+        coverage_rows.append(
+            {
+                "year": row.year,
+                "interest_coverage": interest_coverage,
+                "fcf_to_debt_service": fcf_to_debt_service,
+                "maintenance_capex_coverage": maintenance_cov,
+                "debt_paydown_velocity": paydown_velocity,
+            }
+        )
 
     avg_dscr = sum(dscr_values) / len(dscr_values) if dscr_values else float("nan")
     min_dscr = min(dscr_values) if dscr_values else float("nan")
@@ -727,6 +814,38 @@ def compute_advanced_analytics(
             {"metric": "Average DSCR", "value": avg_dscr},
             {"metric": "Minimum DSCR", "value": min_dscr},
             {"metric": "Payback period (years)", "value": payback},
+            {
+                "metric": "Average return on assets",
+                "value": _nanmean(r["return_on_assets"] for r in returns_rows),
+            },
+            {
+                "metric": "Average return on equity",
+                "value": _nanmean(r["return_on_equity"] for r in returns_rows),
+            },
+            {
+                "metric": "Average return on invested capital",
+                "value": _nanmean(
+                    r["return_on_invested_capital"] for r in returns_rows
+                ),
+            },
+            {
+                "metric": "Average interest coverage",
+                "value": _nanmean(r["interest_coverage"] for r in coverage_rows),
+            },
+            {
+                "metric": "Average free cash flow to debt service",
+                "value": _nanmean(r["fcf_to_debt_service"] for r in coverage_rows),
+            },
+            {
+                "metric": "Average maintenance capex coverage",
+                "value": _nanmean(
+                    r["maintenance_capex_coverage"] for r in coverage_rows
+                ),
+            },
+            {
+                "metric": "Average debt paydown velocity",
+                "value": _nanmean(r["debt_paydown_velocity"] for r in coverage_rows),
+            },
         ]
     )
 
@@ -743,7 +862,14 @@ def compute_advanced_analytics(
         if row.year > 0
     ]
 
-    return {"metrics": metrics, "dscr": dscr_rows, "trend": trend_rows}
+    return {
+        "metrics": metrics,
+        "dscr": dscr_rows,
+        "trend": trend_rows,
+        "returns": returns_rows,
+        "coverage": coverage_rows,
+        "leverage": leverage_rows,
+    }
 
 
 def npv(rate: float, cashflows: Iterable[float]) -> float:
@@ -815,7 +941,11 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
         revenue_schedules, assumptions.cycles_per_year
     )
     financials = build_financial_statements(assumptions, cashflows, loan_schedule)
-    advanced = compute_advanced_analytics(cashflows, financials["income_statement"])
+    advanced = compute_advanced_analytics(
+        cashflows,
+        financials["income_statement"],
+        financials["balance_sheet"],
+    )
 
     valuation_cashflows = [row.free_cash_flow for row in cashflows]
     discount_rate = assumptions.discount_rate
@@ -883,6 +1013,9 @@ def main() -> None:
         write_csv(output_dir / "advanced_metrics.csv", advanced["metrics"])
         write_csv(output_dir / "dscr_summary.csv", advanced["dscr"])
         write_csv(output_dir / "trend_analysis.csv", advanced["trend"])
+        write_csv(output_dir / "return_metrics.csv", advanced["returns"])
+        write_csv(output_dir / "coverage_metrics.csv", advanced["coverage"])
+        write_csv(output_dir / "leverage_metrics.csv", advanced["leverage"])
         for category, rows in revenue_schedules.items():
             safe = (
                 category.lower()

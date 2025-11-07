@@ -424,11 +424,18 @@ def _render_row_editors(
 
             if submitted:
                 for column, (widget_key, raw) in pending_updates.items():
-                    coerced = _coerce_row_value(
-                        raw,
-                        updated_df[column] if column in updated_df.columns else pd.Series(dtype="object"),
+                    target_series = (
+                        updated_df[column]
+                        if column in updated_df.columns
+                        else pd.Series(dtype="object")
                     )
+                    coerced = _coerce_row_value(raw, target_series)
                     if column in updated_df.columns:
+                        if (
+                            pd.api.types.is_string_dtype(updated_df[column].dtype)
+                            and not (coerced is None or isinstance(coerced, str))
+                        ):
+                            updated_df[column] = updated_df[column].astype("object")
                         updated_df.at[idx, column] = coerced
                 for column, value in fixed_columns.items():
                     if column in updated_df.columns:

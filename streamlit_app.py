@@ -756,6 +756,8 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
                 "step": 0.1,
             },
         ],
+        defaults,
+        values,
         columns=4,
     )
 
@@ -806,6 +808,8 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
                 "format": "%.3f",
             },
         ],
+        defaults,
+        values,
         columns=3,
     )
 
@@ -912,6 +916,8 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
                 "format": "%.3f",
             },
         ],
+        defaults,
+        values,
         columns=4,
     )
 
@@ -992,6 +998,8 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
                 "format": "%.3f",
             },
         ],
+        defaults,
+        values,
         columns=4,
     )
 

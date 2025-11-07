@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, get_type_hints
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 from streamlit.delta_generator import DeltaGenerator
 
 from broiler_model.assumptions import Assumptions, ASSUMPTION_SCHEDULE_LAYOUT
@@ -45,6 +46,598 @@ except Exception:  # pragma: no cover - defensive fallback
         name: field.type for name, field in Assumptions.__dataclass_fields__.items()
     }
 
+
+def _to_numeric(series: pd.Series) -> pd.Series:
+    """Coerce a pandas Series to numeric values where possible."""
+
+    return pd.to_numeric(series, errors="coerce")
+
+
+def _build_revenue_stack_chart(summary_df: pd.DataFrame) -> Optional[alt.Chart]:
+    """Return a stacked area chart showing annual revenue by category."""
+
+    if summary_df.empty:
+        return None
+
+    chart_data = summary_df.copy()
+    if "Year" not in chart_data.columns or "Revenue" not in chart_data.columns:
+        return None
+
+    chart_data["Year"] = _to_numeric(chart_data["Year"])
+    chart_data["Revenue"] = _to_numeric(chart_data["Revenue"])
+    chart_data = chart_data.dropna(subset=["Year", "Revenue", "Category"])
+    if chart_data.empty:
+        return None
+
+    chart_data["Year"] = chart_data["Year"].astype(int)
+
+    return (
+        alt.Chart(chart_data)
+        .mark_area(opacity=0.75)
+        .encode(
+            x=alt.X("Year:O", title="Year"),
+            y=alt.Y("sum(Revenue):Q", title="Revenue (USD)", stack="zero"),
+            color=alt.Color("Category:N", title="Category"),
+            tooltip=[
+                alt.Tooltip("Category:N"),
+                alt.Tooltip("Year:O"),
+                alt.Tooltip("Revenue:Q", title="Revenue", format=",.0f"),
+            ],
+        )
+    )
+
+
+def _prepare_cashflow_bridge_frames(cashflow_df: pd.DataFrame) -> Dict[int, pd.DataFrame]:
+    """Build per-year cash-flow bridge frames for waterfall visualisations."""
+
+    bridge_frames: Dict[int, pd.DataFrame] = {}
+    if cashflow_df.empty or "year" not in cashflow_df.columns:
+        return bridge_frames
+
+    numeric_df = cashflow_df.apply(_to_numeric)
+
+    for _, row in numeric_df.iterrows():
+        year_value = row.get("year")
+        if pd.isna(year_value):
+            continue
+        year = int(year_value)
+
+        components: List[Tuple[str, float]] = []
+        ocf = row.get("operating_cash_flow")
+        maint = row.get("maintenance_capex")
+        debt_service = row.get("debt_service")
+        free_cash_flow = row.get("free_cash_flow")
+        present_value = row.get("present_value")
+
+        if not pd.isna(ocf):
+            components.append(("Operating cash flow", float(ocf)))
+        if not pd.isna(maint):
+            components.append(("Maintenance capex", -abs(float(maint))))
+        if not pd.isna(debt_service):
+            components.append(("Debt service", -abs(float(debt_service))))
+
+        records: List[Dict[str, Any]] = []
+        running_total = 0.0
+
+        for label, amount in components:
+            start_value = running_total
+            running_total += amount
+            records.append(
+                {
+                    "Year": year,
+                    "Component": label,
+                    "Start": start_value,
+                    "End": running_total,
+                    "Amount": amount,
+                    "Type": "Increase" if amount >= 0 else "Decrease",
+                }
+            )
+
+        if not pd.isna(free_cash_flow):
+            fcf_val = float(free_cash_flow)
+            records.append(
+                {
+                    "Year": year,
+                    "Component": "Free cash flow",
+                    "Start": 0.0,
+                    "End": fcf_val,
+                    "Amount": fcf_val,
+                    "Type": "Result",
+                }
+            )
+
+        if not pd.isna(present_value):
+            pv_val = float(present_value)
+            records.append(
+                {
+                    "Year": year,
+                    "Component": "Present value",
+                    "Start": 0.0,
+                    "End": pv_val,
+                    "Amount": pv_val,
+                    "Type": "Result",
+                }
+            )
+
+        if not records:
+            continue
+
+        frame = pd.DataFrame(records)
+        frame["Base"] = frame[["Start", "End"]].min(axis=1)
+        frame["Cap"] = frame[["Start", "End"]].max(axis=1)
+        frame["Mid"] = frame[["Base", "Cap"]].mean(axis=1)
+        bridge_frames[year] = frame
+
+    return bridge_frames
+
+
+def _cashflow_waterfall_chart(frame: pd.DataFrame) -> Optional[alt.Chart]:
+    """Return a waterfall chart for a single year's cash-flow bridge."""
+
+    if frame.empty:
+        return None
+
+    component_order = [
+        label
+        for label in [
+            "Operating cash flow",
+            "Maintenance capex",
+            "Debt service",
+            "Free cash flow",
+            "Present value",
+        ]
+        if label in frame["Component"].values
+    ]
+
+    color_scale = alt.Scale(
+        domain=["Increase", "Decrease", "Result"],
+        range=["#2ca02c", "#d62728", "#1f77b4"],
+    )
+
+    bars = (
+        alt.Chart(frame)
+        .mark_bar()
+        .encode(
+            x=alt.X("Component:N", sort=component_order, title="Component"),
+            y=alt.Y("Base:Q", title="Cash impact (USD)"),
+            y2="Cap:Q",
+            color=alt.Color("Type:N", scale=color_scale, title="Movement"),
+            tooltip=[
+                alt.Tooltip("Component:N"),
+                alt.Tooltip("Amount:Q", format=",.0f"),
+                alt.Tooltip("Start:Q", title="Start", format=",.0f"),
+                alt.Tooltip("End:Q", title="End", format=",.0f"),
+            ],
+        )
+    )
+
+    labels = (
+        alt.Chart(frame)
+        .mark_text(color="black", dy=-6)
+        .encode(
+            x=alt.X("Component:N", sort=component_order),
+            y=alt.Y("Cap:Q"),
+            text=alt.Text("Amount:Q", format=",.0f"),
+        )
+    )
+
+    return bars + labels
+
+
+def _combined_leverage_chart(
+    dscr_df: pd.DataFrame, coverage_df: pd.DataFrame, leverage_df: pd.DataFrame
+) -> Optional[alt.Chart]:
+    """Create a combined line chart for DSCR, interest coverage, and leverage metrics."""
+
+    records: List[Dict[str, Any]] = []
+
+    if not dscr_df.empty and {"year", "dscr"}.issubset(dscr_df.columns):
+        temp = dscr_df.copy()
+        temp["year"] = _to_numeric(temp["year"])
+        temp["dscr"] = _to_numeric(temp["dscr"])
+        for _, row in temp.dropna(subset=["year", "dscr"]).iterrows():
+            records.append(
+                {
+                    "Year": int(row["year"]),
+                    "Metric": "DSCR",
+                    "Value": float(row["dscr"]),
+                }
+            )
+
+    if not coverage_df.empty and "year" in coverage_df.columns:
+        temp = coverage_df.copy()
+        temp["year"] = _to_numeric(temp["year"])
+        for column, label in [
+            ("interest_coverage", "Interest coverage"),
+        ]:
+            if column in temp.columns:
+                temp[column] = _to_numeric(temp[column])
+                for _, row in temp.dropna(subset=["year", column]).iterrows():
+                    records.append(
+                        {
+                            "Year": int(row["year"]),
+                            "Metric": label,
+                            "Value": float(row[column]),
+                        }
+                    )
+
+    if not leverage_df.empty and "year" in leverage_df.columns:
+        temp = leverage_df.copy()
+        temp["year"] = _to_numeric(temp["year"])
+        leverage_column = None
+        leverage_label = ""
+        if "debt_to_equity" in temp.columns:
+            leverage_column = "debt_to_equity"
+            leverage_label = "Debt-to-equity"
+        elif "debt_ratio" in temp.columns:
+            leverage_column = "debt_ratio"
+            leverage_label = "Debt ratio"
+        if leverage_column:
+            temp[leverage_column] = _to_numeric(temp[leverage_column])
+            for _, row in temp.dropna(subset=["year", leverage_column]).iterrows():
+                records.append(
+                    {
+                        "Year": int(row["year"]),
+                        "Metric": leverage_label,
+                        "Value": float(row[leverage_column]),
+                    }
+                )
+
+    if not records:
+        return None
+
+    data = pd.DataFrame(records)
+    data = data.dropna(subset=["Year", "Value"])
+    if data.empty:
+        return None
+
+    data["Year"] = data["Year"].astype(int)
+
+    return (
+        alt.Chart(data)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("Year:O", title="Year"),
+            y=alt.Y("Value:Q", title="Ratio"),
+            color=alt.Color("Metric:N", title="Metric"),
+            tooltip=[
+                alt.Tooltip("Metric:N"),
+                alt.Tooltip("Year:O"),
+                alt.Tooltip("Value:Q", format=",.2f"),
+            ],
+        )
+    )
+
+
+def _tornado_chart(
+    what_if_df: pd.DataFrame, scenario_df: pd.DataFrame
+) -> Optional[alt.Chart]:
+    """Build a tornado chart comparing scenario deltas by NPV."""
+
+    records: List[Dict[str, Any]] = []
+
+    if not what_if_df.empty and {"Scenario", "NPV Δ"}.issubset(what_if_df.columns):
+        for _, row in what_if_df.iterrows():
+            scenario = row.get("Scenario")
+            if scenario in {None, "Baseline"}:
+                continue
+            delta = row.get("NPV Δ")
+            delta_val = float(delta) if pd.notna(delta) else None
+            if delta_val is None:
+                continue
+            records.append(
+                {
+                    "Scenario": str(scenario),
+                    "Impact": delta_val,
+                    "Source": "What-if",
+                }
+            )
+
+    if not scenario_df.empty and {"Scenario", "NPV Δ"}.issubset(scenario_df.columns):
+        for _, row in scenario_df.iterrows():
+            scenario = row.get("Scenario")
+            if scenario in {None, "Baseline"}:
+                continue
+            delta = row.get("NPV Δ")
+            delta_val = float(delta) if pd.notna(delta) else None
+            if delta_val is None:
+                continue
+            records.append(
+                {
+                    "Scenario": str(scenario),
+                    "Impact": delta_val,
+                    "Source": "Scenario planning",
+                }
+            )
+
+    if not records:
+        return None
+
+    data = pd.DataFrame(records)
+    data = data.dropna(subset=["Impact"])
+    if data.empty:
+        return None
+
+    data["Label"] = data["Source"] + " – " + data["Scenario"]
+    data["abs_impact"] = data["Impact"].abs()
+    order = data.sort_values("abs_impact", ascending=False)["Label"].tolist()
+
+    bars = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            y=alt.Y("Label:N", sort=order, title="Scenario"),
+            x=alt.X("Impact:Q", title="NPV Δ (USD)"),
+            color=alt.Color("Source:N", title="Source"),
+            tooltip=[
+                alt.Tooltip("Source:N"),
+                alt.Tooltip("Scenario:N"),
+                alt.Tooltip("Impact:Q", title="NPV Δ", format=",.0f"),
+            ],
+        )
+    )
+
+    zero_rule = alt.Chart(pd.DataFrame({"Impact": [0]})).mark_rule(color="black")
+
+    return bars + zero_rule.encode(x="Impact:Q")
+
+
+def _monte_carlo_distribution_charts(samples_df: pd.DataFrame) -> List[Tuple[str, alt.Chart]]:
+    """Return histogram+density charts for Monte Carlo outputs."""
+
+    charts: List[Tuple[str, alt.Chart]] = []
+    if samples_df.empty:
+        return charts
+
+    numeric = samples_df.apply(_to_numeric)
+    metric_map = {
+        "npv": "NPV",
+        "irr": "IRR",
+        "min_dscr": "Minimum DSCR",
+    }
+
+    for column, label in metric_map.items():
+        if column not in numeric.columns:
+            continue
+        series = numeric[column].dropna()
+        if series.empty:
+            continue
+        base = pd.DataFrame({label: series})
+        histogram = (
+            alt.Chart(base)
+            .mark_bar(opacity=0.45)
+            .encode(
+                x=alt.X(f"{label}:Q", bin=alt.Bin(maxbins=40), title=label),
+                y=alt.Y("count():Q", title="Iterations"),
+                tooltip=[alt.Tooltip("count():Q", title="Iterations")],
+            )
+        )
+        density = (
+            alt.Chart(base)
+            .transform_density(label, as_=[label, "density"])
+            .mark_line(color="#d62728")
+            .encode(
+                x=alt.X(f"{label}:Q", title=label),
+                y=alt.Y("density:Q", title="Density"),
+            )
+        )
+        charts.append((label, histogram + density))
+
+    return charts
+
+
+def _build_anomaly_points(risk_df: pd.DataFrame, trend_df: pd.DataFrame) -> pd.DataFrame:
+    """Align anomaly flags with historical revenue values for plotting."""
+
+    if risk_df.empty or trend_df.empty:
+        return pd.DataFrame()
+
+    if "Year" not in risk_df.columns or {"year", "revenue"} - set(trend_df.columns):
+        return pd.DataFrame()
+
+    revenue_lookup = (
+        trend_df[["year", "revenue"]]
+        .assign(year=lambda df: pd.to_numeric(df["year"], errors="coerce"))
+        .dropna(subset=["year", "revenue"])
+        .set_index("year")["revenue"]
+    )
+
+    points: List[Dict[str, Any]] = []
+    aligned = risk_df.copy()
+    aligned["Year"] = _to_numeric(aligned["Year"])
+    if "Observed growth" in aligned.columns:
+        aligned["Observed growth"] = _to_numeric(aligned["Observed growth"])
+
+    for _, row in aligned.dropna(subset=["Year"]).iterrows():
+        year = float(row["Year"])
+        if year not in revenue_lookup.index:
+            continue
+        points.append(
+            {
+                "Year": int(year),
+                "Value": float(revenue_lookup.loc[year]),
+                "Flag": row.get("Flag", "Anomaly"),
+                "Observed growth": row.get("Observed growth"),
+            }
+        )
+
+    return pd.DataFrame(points)
+
+
+def _forecast_overlay_chart(
+    trend_df: pd.DataFrame,
+    forecast_df: pd.DataFrame,
+    time_series_df: pd.DataFrame,
+    anomaly_points: pd.DataFrame,
+) -> Optional[alt.Chart]:
+    """Render a combined forecast chart with anomaly highlights."""
+
+    records: List[Dict[str, Any]] = []
+
+    if not trend_df.empty and {"year", "revenue"}.issubset(trend_df.columns):
+        temp = trend_df.copy()
+        temp["year"] = _to_numeric(temp["year"])
+        temp["revenue"] = _to_numeric(temp["revenue"])
+        for _, row in temp.dropna(subset=["year", "revenue"]).iterrows():
+            records.append(
+                {
+                    "Year": int(row["year"]),
+                    "Series": "Historical revenue",
+                    "Value": float(row["revenue"]),
+                }
+            )
+
+    if not forecast_df.empty and {"Year", "Revenue forecast"}.issubset(forecast_df.columns):
+        temp = forecast_df.copy()
+        temp["Year"] = _to_numeric(temp["Year"])
+        temp["Revenue forecast"] = _to_numeric(temp["Revenue forecast"])
+        for _, row in temp.dropna(subset=["Year", "Revenue forecast"]).iterrows():
+            records.append(
+                {
+                    "Year": int(row["Year"]),
+                    "Series": "Automated forecast",
+                    "Value": float(row["Revenue forecast"]),
+                }
+            )
+
+    if not time_series_df.empty and {"Year", "Revenue forecast"}.issubset(time_series_df.columns):
+        temp = time_series_df.copy()
+        temp["Year"] = _to_numeric(temp["Year"])
+        temp["Revenue forecast"] = _to_numeric(temp["Revenue forecast"])
+        for _, row in temp.dropna(subset=["Year", "Revenue forecast"]).iterrows():
+            records.append(
+                {
+                    "Year": int(row["Year"]),
+                    "Series": "AR(1) forecast",
+                    "Value": float(row["Revenue forecast"]),
+                }
+            )
+
+    if not records:
+        return None
+
+    data = pd.DataFrame(records)
+    data = data.dropna(subset=["Year", "Value"])
+    if data.empty:
+        return None
+
+    data["Year"] = data["Year"].astype(int)
+
+    base_chart = (
+        alt.Chart(data)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("Year:O", title="Year"),
+            y=alt.Y("Value:Q", title="Revenue (USD)"),
+            color=alt.Color("Series:N", title="Series"),
+            tooltip=[
+                alt.Tooltip("Series:N"),
+                alt.Tooltip("Year:O"),
+                alt.Tooltip("Value:Q", title="Revenue", format=",.0f"),
+            ],
+        )
+    )
+
+    if anomaly_points.empty:
+        return base_chart
+
+    anomalies = anomaly_points.copy()
+    anomalies["Year"] = _to_numeric(anomalies["Year"])
+    anomalies["Value"] = _to_numeric(anomalies["Value"])
+    anomalies = anomalies.dropna(subset=["Year", "Value"])
+    anomalies["Year"] = anomalies["Year"].astype(int)
+
+    points = (
+        alt.Chart(anomalies)
+        .mark_point(shape="triangle-up", size=120, color="#d62728")
+        .encode(
+            x=alt.X("Year:O"),
+            y=alt.Y("Value:Q"),
+            tooltip=[
+                alt.Tooltip("Flag:N"),
+                alt.Tooltip("Year:O"),
+                alt.Tooltip("Value:Q", title="Revenue", format=",.0f"),
+                alt.Tooltip("Observed growth:Q", format=".2%"),
+            ],
+        )
+    )
+
+    return base_chart + points
+
+
+def _break_even_heatmap_charts(
+    break_even_df: pd.DataFrame,
+) -> Tuple[Optional[alt.Chart], Optional[alt.Chart]]:
+    """Build cost heatmap and break-even unit charts for the break-even analysis."""
+
+    if break_even_df.empty or "Category" not in break_even_df.columns:
+        return None, None
+
+    cost_columns = [col for col in ["Direct cost", "Shared cost"] if col in break_even_df.columns]
+    heatmap: Optional[alt.Chart] = None
+    units_chart: Optional[alt.Chart] = None
+
+    if cost_columns:
+        cost_long = (
+            break_even_df.melt(
+                id_vars="Category",
+                value_vars=cost_columns,
+                var_name="Cost component",
+                value_name="Cost",
+            )
+        )
+        cost_long["Cost"] = _to_numeric(cost_long["Cost"])
+        cost_long = cost_long.dropna(subset=["Cost"])
+        if not cost_long.empty:
+            heatmap_base = (
+                alt.Chart(cost_long)
+                .mark_rect()
+                .encode(
+                    x=alt.X("Category:N", title="Category"),
+                    y=alt.Y("Cost component:N", title="Cost type"),
+                    color=alt.Color(
+                        "Cost:Q",
+                        title="Annual cost (USD)",
+                        scale=alt.Scale(scheme="yellowgreenblue"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("Category:N"),
+                        alt.Tooltip("Cost component:N"),
+                        alt.Tooltip("Cost:Q", format=",.0f"),
+                    ],
+                )
+            )
+            heatmap_text = (
+                alt.Chart(cost_long)
+                .mark_text(color="black")
+                .encode(
+                    x=alt.X("Category:N"),
+                    y=alt.Y("Cost component:N"),
+                    text=alt.Text("Cost:Q", format=",.0f"),
+                )
+            )
+            heatmap = heatmap_base + heatmap_text
+
+    if "Break-even units" in break_even_df.columns:
+        units_data = break_even_df[["Category", "Break-even units"]].copy()
+        units_data["Break-even units"] = _to_numeric(units_data["Break-even units"])
+        units_data = units_data.dropna(subset=["Break-even units"])
+        if not units_data.empty:
+            units_chart = (
+                alt.Chart(units_data)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Category:N", title="Category"),
+                    y=alt.Y("Break-even units:Q", title="Break-even units"),
+                    color=alt.Color("Category:N", legend=None),
+                    tooltip=[
+                        alt.Tooltip("Category:N"),
+                        alt.Tooltip("Break-even units:Q", format=",.0f"),
+                    ],
+                )
+            )
+
+    return heatmap, units_chart
 
 def _payload_to_ai_settings(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return AI settings merged with defaults."""
@@ -1378,6 +1971,7 @@ def main() -> None:
     cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])
     annual_df = pd.DataFrame([asdict(results["annual"])])
     cashflow_df = pd.DataFrame([asdict(row) for row in results["cashflows"]])
+    cashflow_bridge_frames = _prepare_cashflow_bridge_frames(cashflow_df)
     income_df = pd.DataFrame([asdict(row) for row in financials["income_statement"]])
     balance_df = pd.DataFrame([asdict(row) for row in financials["balance_sheet"]])
     cash_statement_df = pd.DataFrame([asdict(row) for row in financials["cash_flow_statement"]])
@@ -1572,6 +2166,9 @@ def main() -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+            revenue_chart = _build_revenue_stack_chart(summary_by_category)
+            if revenue_chart is not None:
+                st.altair_chart(revenue_chart, use_container_width=True)
 
         annual_totals_df = pd.DataFrame(revenue_summary.get("annual_totals", []))
         if not annual_totals_df.empty:
@@ -1590,6 +2187,18 @@ def main() -> None:
 
         st.subheader("Discounted cash flows")
         st.dataframe(cashflow_df, use_container_width=True)
+        if cashflow_bridge_frames:
+            waterfall_years = sorted(cashflow_bridge_frames)
+            waterfall_year = st.selectbox(
+                "Cash-flow bridge year",
+                waterfall_years,
+                key=f"waterfall_year_{selected_scenario}",
+            )
+            waterfall_chart = _cashflow_waterfall_chart(
+                cashflow_bridge_frames.get(waterfall_year, pd.DataFrame())
+            )
+            if waterfall_chart is not None:
+                st.altair_chart(waterfall_chart, use_container_width=True)
 
         st.subheader("Debt schedule")
         st.dataframe(loan_df, use_container_width=True, hide_index=True)
@@ -1724,6 +2333,11 @@ def main() -> None:
                 scenario_df.replace({pd.NA: None}).to_dict("records")
             )
 
+        tornado_chart = _tornado_chart(what_if_df, scenario_df)
+        if tornado_chart is not None:
+            st.markdown("#### Sensitivity tornado (NPV deltas)")
+            st.altair_chart(tornado_chart, use_container_width=True)
+
         monte_carlo_settings = (
             monte_carlo.get("settings", {}) if isinstance(monte_carlo, dict) else {}
         )
@@ -1815,15 +2429,12 @@ def main() -> None:
             )
 
         if not monte_carlo_samples_df.empty:
-            st.caption("NPV distribution across Monte Carlo iterations")
-            try:
-                chart_series = pd.to_numeric(
-                    monte_carlo_samples_df.set_index("iteration")["npv"],
-                    errors="coerce",
-                )
-                st.line_chart(chart_series.dropna())
-            except KeyError:
-                pass
+            st.caption("Monte Carlo outcome distributions")
+            for label, chart in _monte_carlo_distribution_charts(
+                monte_carlo_samples_df
+            ):
+                st.markdown(f"**{label} distribution**")
+                st.altair_chart(chart, use_container_width=True)
 
         if not break_even_df.empty:
             st.subheader("Break-even analysis by product")
@@ -1837,6 +2448,11 @@ def main() -> None:
             advanced["break_even"] = (
                 break_even_df.replace({pd.NA: None}).to_dict("records")
             )
+            heatmap_chart, units_chart = _break_even_heatmap_charts(break_even_df)
+            if heatmap_chart is not None:
+                st.altair_chart(heatmap_chart, use_container_width=True)
+            if units_chart is not None:
+                st.altair_chart(units_chart, use_container_width=True)
 
         if goal_seek:
             st.subheader("Goal seek (target NPV)")
@@ -1861,12 +2477,6 @@ def main() -> None:
                 namespace=analytics_namespace,
             )
             advanced["dscr"] = dscr_df.replace({pd.NA: None}).to_dict("records")
-            try:
-                dscr_chart = dscr_df.set_index("year")
-                dscr_chart = dscr_chart.apply(pd.to_numeric, errors="coerce")
-                st.line_chart(dscr_chart.dropna(how="all", axis=1))
-            except KeyError:
-                pass
 
         if not returns_df.empty:
             st.subheader("Return diagnostics")
@@ -1907,22 +2517,6 @@ def main() -> None:
             advanced["coverage"] = (
                 coverage_df.replace({pd.NA: None}).to_dict("records")
             )
-            try:
-                coverage_chart = coverage_df.set_index("year")
-                coverage_chart = coverage_chart.apply(pd.to_numeric, errors="coerce")
-                subset_cols = [
-                    col
-                    for col in [
-                        "interest_coverage",
-                        "fcf_to_debt_service",
-                        "maintenance_capex_coverage",
-                    ]
-                    if col in coverage_chart.columns
-                ]
-                if subset_cols:
-                    st.line_chart(coverage_chart[subset_cols].dropna(how="all"))
-            except KeyError:
-                pass
 
         if not leverage_df.empty:
             st.subheader("Leverage profile")
@@ -1936,18 +2530,13 @@ def main() -> None:
             advanced["leverage"] = (
                 leverage_df.replace({pd.NA: None}).to_dict("records")
             )
-            try:
-                leverage_chart = leverage_df.set_index("year")
-                leverage_chart = leverage_chart.apply(pd.to_numeric, errors="coerce")
-                subset_cols = [
-                    col
-                    for col in ["debt_to_equity", "debt_ratio"]
-                    if col in leverage_chart.columns
-                ]
-                if subset_cols:
-                    st.line_chart(leverage_chart[subset_cols].dropna(how="all"))
-            except KeyError:
-                pass
+
+        combined_leverage_chart = _combined_leverage_chart(
+            dscr_df, coverage_df, leverage_df
+        )
+        if combined_leverage_chart is not None:
+            st.markdown("#### Coverage vs leverage overview")
+            st.altair_chart(combined_leverage_chart, use_container_width=True)
 
         if not trend_df.empty:
             st.subheader("Performance trends")
@@ -2040,6 +2629,14 @@ def main() -> None:
                 f"Mean growth: {risk_metadata.get('mean_growth', float('nan')):.2%} — "
                 f"Std dev: {risk_metadata.get('std_growth', float('nan')):.2%}"
             )
+
+        anomaly_points = _build_anomaly_points(risk_df, trend_df)
+        overlay_chart = _forecast_overlay_chart(
+            trend_df, forecast_df, time_series_df, anomaly_points
+        )
+        if overlay_chart is not None:
+            st.markdown("#### Revenue outlook (historical vs forecasts)")
+            st.altair_chart(overlay_chart, use_container_width=True)
 
         if not ml_methods_df.empty:
             st.subheader("ML method diagnostics")

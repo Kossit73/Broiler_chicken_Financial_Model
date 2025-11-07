@@ -145,7 +145,10 @@ refresh instantly. Below the metrics you will find three workspaces:
 1. **Production & revenues** – retains the assumptions summary (grouped into the
    four schedules), detailed revenue schedules with annual rollups, production
    cycle results, annual summary, discounted cash flows, and the derived debt and
-   asset schedules.
+   asset schedules. The page now layers in a stacked area chart of annual
+   revenue by category plus a selectable cash-flow waterfall bridge so you can
+   visualise how operating cash flow, maintenance capex, and debt service roll
+   into free cash flow and discounted value each year.
 2. **Financial statements** – exposes the modeled income statement, balance
    sheet, cash flow statement, and debt amortization tables.
 3. **Advanced analytics** – surfaces KPIs (average margins, DSCR, payback,
@@ -153,12 +156,15 @@ refresh instantly. Below the metrics you will find three workspaces:
    leverage velocity) alongside interactive what-if tables, scenario planning,
    Monte Carlo stress tests, product break-even and goal-seek diagnostics, plus
    automated/predictive forecasting (linear and AR(1) time-series), risk &
-   anomaly detection, and ML method summaries with charts for DSCR, returns,
-   coverage, leverage, and long-range revenue/EBITDA/net-income/free-cash-flow
-   trends. Monte Carlo distributions are now editable from the UI and the engine
-   draws vectorised samples from the configured normal/lognormal/triangular
-   definitions, exporting the applied distributions alongside the summary.
-   Break-even schedules separate direct versus shared cost allocations to avoid
+   anomaly detection, and ML method summaries. New visuals include a combined
+   DSCR/interest-coverage/leverage line chart, tornado-style sensitivity bars,
+   histogram+density plots for Monte Carlo outcomes, a layered revenue forecast
+   overlay (historical vs. automated vs. AR(1) projections with anomaly flags),
+   and a break-even cost heatmap with companion unit bars. Monte Carlo
+   distributions remain editable from the UI and the engine draws vectorised
+   samples from the configured normal/lognormal/triangular definitions,
+   exporting the applied distributions alongside the summary. Break-even
+   schedules continue to separate direct versus shared cost allocations to avoid
    revenue-share distortions when unit economics differ across categories. A
    **Simulation builder** validates per-scenario rows (parameter, change type,
    magnitude), highlights invalid entries, and charts NPV deltas so analysts can

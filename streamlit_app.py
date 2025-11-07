@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 from dataclasses import asdict, dataclass, is_dataclass
 from io import BytesIO
+import json
+import math
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -359,6 +361,57 @@ def _sanitize_key(label: str) -> str:
     return re.sub(r"[^0-9a-zA-Z_]+", "_", label.lower()).strip("_") or "schedule"
 
 
+def _stringify_iterable_value(value: Any) -> Any:
+    if isinstance(value, (list, tuple, dict)):
+        try:
+            return json.dumps(value)
+        except TypeError:
+            return str(value)
+    return value
+
+
+def _stringify_iterable_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+    new_df = df.copy()
+    for column in columns:
+        if column in new_df.columns:
+            new_df[column] = new_df[column].apply(_stringify_iterable_value)
+    return new_df
+
+
+def _parse_iterable_value(value: Any) -> Any:
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parts = [part.strip() for part in re.split(r"[,;]", text) if part.strip()]
+            if not parts:
+                return None
+            parsed_parts: List[Any] = []
+            for item in parts:
+                try:
+                    parsed_parts.append(float(item))
+                except ValueError:
+                    parsed_parts.append(item)
+            parsed = parsed_parts
+        return parsed
+    return value
+
+
+def _parse_iterable_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+    new_df = df.copy()
+    for column in columns:
+        if column in new_df.columns:
+            new_df[column] = new_df[column].apply(_parse_iterable_value)
+    return new_df
+
+
 def _chunked(iterable: Iterable[Any], size: int) -> Iterable[List[Any]]:
     chunk: List[Any] = []
     for item in iterable:
@@ -585,6 +638,7 @@ def _render_analytics_schedule(
     allow_yearly_increment: bool = False,
     row_defaults: Optional[Dict[str, Any]] = None,
     fixed_columns: Optional[Dict[str, Any]] = None,
+    iterable_columns: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """Convenience wrapper to expose schedule editing in advanced analytics."""
 
@@ -592,8 +646,17 @@ def _render_analytics_schedule(
         return df
 
     clean_df = df.copy()
+    iterable_columns = iterable_columns or []
+    if iterable_columns:
+        clean_df = _stringify_iterable_columns(clean_df, iterable_columns)
+
     defaults = clean_df.where(pd.notna(clean_df), None).to_dict("records")
     template = row_defaults or {column: None for column in clean_df.columns}
+    if iterable_columns and template:
+        template = template.copy()
+        for column in iterable_columns:
+            if column in template:
+                template[column] = _stringify_iterable_value(template[column])
 
     return _render_schedule_editor(
         title,
@@ -604,7 +667,7 @@ def _render_analytics_schedule(
         fixed_columns=fixed_columns,
         row_defaults=template,
         allow_yearly_increment=allow_yearly_increment,
-    )
+    ).pipe(lambda edited: _parse_iterable_columns(edited, iterable_columns) if iterable_columns else edited)
 
 
 def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = None) -> None:
@@ -1456,6 +1519,7 @@ def main() -> None:
             distributions_df,
             selected_scenario,
             namespace=analytics_namespace,
+            iterable_columns=["bounds"],
         )
         distribution_records = (
             distributions_df.replace({pd.NA: None}).to_dict("records")

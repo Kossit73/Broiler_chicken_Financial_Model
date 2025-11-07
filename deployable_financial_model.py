@@ -14,7 +14,7 @@ import csv
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 @dataclass
@@ -334,6 +334,82 @@ def build_revenue_schedules(
         schedules[category] = template_rows
 
     return schedules
+
+
+def summarise_revenue_totals(
+    revenue_schedules: Dict[str, List[Dict[str, Any]]], cycles_per_year: int
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Aggregate revenue schedules into annual totals per category and overall.
+
+    The helper re-computes per-row revenue using Units × Unit price when
+    possible before summing, ensuring the annual views mirror the underlying
+    cycle-level data even if a user has not explicitly edited the revenue
+    column.
+    """
+
+    per_category: List[Dict[str, Any]] = []
+    per_year_totals: Dict[int, float] = {}
+    cycles = int(cycles_per_year) if cycles_per_year else 0
+    cycles = max(cycles, 1)
+
+    for category, rows in revenue_schedules.items():
+        if not rows:
+            continue
+
+        category_totals: Dict[int, float] = {}
+        for idx, row in enumerate(rows):
+            units = _to_float(row.get("Units"))
+            unit_price = _to_float(row.get("Unit price"))
+            revenue_value = _to_float(row.get("Revenue"))
+
+            value: Optional[float] = None
+            if units is not None and unit_price is not None:
+                value = units * unit_price
+                row["Revenue"] = value
+            elif revenue_value is not None:
+                value = revenue_value
+                row["Revenue"] = revenue_value
+
+            if value is None:
+                continue
+
+            year = (idx // cycles) + 1
+            category_totals[year] = category_totals.get(year, 0.0) + value
+
+        for year, total in sorted(category_totals.items()):
+            total_float = float(total)
+            per_category.append(
+                {"Category": category, "Year": int(year), "Revenue": total_float}
+            )
+            per_year_totals[year] = per_year_totals.get(year, 0.0) + total_float
+
+    annual_totals = [
+        {"Year": int(year), "Revenue": float(total)}
+        for year, total in sorted(per_year_totals.items())
+    ]
+
+    return {"by_category": per_category, "annual_totals": annual_totals}
+
+
+def _to_float(value: Any) -> Optional[float]:
+    """Return a float when ``value`` is numeric, otherwise ``None``."""
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def compute_cycles(assumptions: Assumptions) -> List[CycleResults]:
@@ -735,6 +811,9 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
     annual = annual_summary(assumptions, cycles)
     cashflows, loan_schedule = discounted_cash_flow(assumptions, annual)
     revenue_schedules = build_revenue_schedules(assumptions, cycles)
+    revenue_summary = summarise_revenue_totals(
+        revenue_schedules, assumptions.cycles_per_year
+    )
     financials = build_financial_statements(assumptions, cashflows, loan_schedule)
     advanced = compute_advanced_analytics(cashflows, financials["income_statement"])
 
@@ -758,6 +837,7 @@ def generate_model_outputs(assumptions: Assumptions) -> Dict[str, Any]:
         "annual": annual,
         "cashflows": cashflows,
         "revenue_schedules": revenue_schedules,
+        "revenue_summary": revenue_summary,
         "valuation": valuation,
         "financial_statements": financials,
         "advanced_analytics": advanced,
@@ -781,6 +861,7 @@ def main() -> None:
     cashflows = results["cashflows"]
     valuation = results["valuation"]
     revenue_schedules = results["revenue_schedules"]
+    revenue_summary = results["revenue_summary"]
     financials = results["financial_statements"]
     advanced = results["advanced_analytics"]
 
@@ -813,6 +894,15 @@ def main() -> None:
             )
             write_csv(output_dir / f"{safe}_schedule.csv", rows)
 
+        write_csv(
+            output_dir / "revenue_summary_by_category.csv",
+            revenue_summary.get("by_category", []),
+        )
+        write_csv(
+            output_dir / "revenue_summary_annual.csv",
+            revenue_summary.get("annual_totals", []),
+        )
+
     if "json" in args.formats:
         write_json(output_dir / "assumptions.json", asdict(assumptions))
         write_json(output_dir / "assumptions_summary.json", assumption_schedule)
@@ -825,6 +915,7 @@ def main() -> None:
         write_json(output_dir / "loan_schedule.json", loan_schedule)
         write_json(output_dir / "advanced_analytics.json", advanced)
         write_json(output_dir / "revenue_schedules.json", revenue_schedules)
+        write_json(output_dir / "revenue_summary.json", revenue_summary)
 
     write_json(output_dir / "valuation.json", valuation)
 

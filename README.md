@@ -51,6 +51,9 @@ The command creates the `outputs/` directory (if needed) and writes:
 - Revenue schedule CSVs for each category (`broiler_revenue_schedule.csv`,
   `eggs_revenue_schedule.csv`, etc.) plus `revenue_schedules.json` capturing all
   five categories in one structure for downstream tooling.
+- `revenue_summary_by_category.csv`, `revenue_summary_annual.csv`, and
+  `revenue_summary.json` – Year-by-year revenue totals ensuring annual figures
+  tie directly to the summed cycle-level schedules.
 - `valuation.json` – NPV/IRR results using the modeled cash flows.
 - `manifest.json` – convenience listing of the generated files.
 
@@ -79,8 +82,9 @@ configurations. As you tweak values, the NPV/IRR metrics and detailed tables
 refresh instantly. Below the metrics you will find three workspaces:
 
 1. **Production & revenues** – retains the assumptions summary (grouped into the
-   four schedules), detailed revenue schedules, production cycle results, annual
-   summary, and discounted cash flows.
+   four schedules), detailed revenue schedules with annual rollups, production
+   cycle results, annual summary, discounted cash flows, and the derived debt and
+   asset schedules.
 2. **Financial statements** – exposes the modeled income statement, balance
    sheet, cash flow statement, and debt amortization tables.
 3. **Advanced analytics** – surfaces KPIs (average margins, DSCR, payback) and
@@ -91,10 +95,10 @@ The Production & revenues tab includes an **Excel export** card—click *Prepare
 Excel Model* to generate a multi-sheet workbook and download it directly from
 the browser.
 
-Open the **AI & Machine Learning Settings** expander in the Advanced analytics
-tab to configure optional forecasting and narrative preferences. The settings
-panel stores values per scenario and supports multiple providers, model names,
-and narrative focus areas.
+An **AI & Machine Learning Settings** expander appears at the top of the Input
+Landing Page so you can configure optional forecasting and narrative preferences
+before editing assumptions. The settings panel stores values per scenario and
+supports multiple providers, model names, and narrative focus areas.
 
 ### Configuring editable schedules
 

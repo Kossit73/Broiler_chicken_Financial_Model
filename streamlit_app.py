@@ -12,7 +12,11 @@ import pandas as pd
 import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
 
-from deployable_financial_model import Assumptions, generate_model_outputs
+from deployable_financial_model import (
+    Assumptions,
+    generate_model_outputs,
+    summarise_revenue_totals,
+)
 
 
 def _payload_to_ai_settings(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1110,6 +1114,12 @@ def main() -> None:
     valuation = results["valuation"]
     assumption_schedule_df = pd.DataFrame(results["assumptions_schedule"])
     revenue_schedules = results["revenue_schedules"]
+    revenue_summary = results.get(
+        "revenue_summary",
+        summarise_revenue_totals(
+            revenue_schedules, model.assumptions.cycles_per_year
+        ),
+    )
     financials = results["financial_statements"]
     advanced = results["advanced_analytics"]
 
@@ -1224,6 +1234,28 @@ def main() -> None:
         if updated_revenue:
             revenue_schedules = updated_revenue
             results["revenue_schedules"] = updated_revenue
+            revenue_summary = summarise_revenue_totals(
+                revenue_schedules, model.assumptions.cycles_per_year
+            )
+            results["revenue_summary"] = revenue_summary
+
+        summary_by_category = pd.DataFrame(revenue_summary.get("by_category", []))
+        if not summary_by_category.empty:
+            st.markdown("##### Annual revenue by category")
+            st.dataframe(
+                summary_by_category,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        annual_totals_df = pd.DataFrame(revenue_summary.get("annual_totals", []))
+        if not annual_totals_df.empty:
+            st.markdown("##### Total revenue by year")
+            st.dataframe(
+                annual_totals_df,
+                use_container_width=True,
+                hide_index=True,
+            )
 
         st.subheader("Production cycles")
         st.dataframe(cycles_df, use_container_width=True)

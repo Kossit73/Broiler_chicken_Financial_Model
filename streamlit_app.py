@@ -598,6 +598,40 @@ def _render_schedule_editor(
 
     state["data"] = edited_df.replace({pd.NA: None}).to_dict("records")
     return edited_df.reindex(columns=original_columns, fill_value=None)
+
+
+def _render_analytics_schedule(
+    title: str,
+    schedule_id: str,
+    df: pd.DataFrame,
+    scenario: str,
+    *,
+    namespace: str = "advanced_schedule_state",
+    allow_yearly_increment: bool = False,
+    row_defaults: Optional[Dict[str, Any]] = None,
+    fixed_columns: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
+    """Convenience wrapper to expose schedule editing in advanced analytics."""
+
+    if df is None or df.empty:
+        return df
+
+    clean_df = df.copy()
+    defaults = clean_df.where(pd.notna(clean_df), None).to_dict("records")
+    template = row_defaults or {column: None for column in clean_df.columns}
+
+    return _render_schedule_editor(
+        title,
+        _sanitize_key(schedule_id or title),
+        defaults,
+        scenario,
+        namespace=namespace,
+        fixed_columns=fixed_columns,
+        row_defaults=template,
+        allow_yearly_increment=allow_yearly_increment,
+    )
+
+
 def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = None) -> None:
     """Render AI and machine-learning configuration controls."""
 
@@ -1344,9 +1378,19 @@ def main() -> None:
         with fin_tab4:
             st.dataframe(loan_df, use_container_width=True, hide_index=True)
 
+    analytics_namespace = "advanced_schedule_state"
+
     with analytics_tab:
-        st.subheader("Advanced metrics")
-        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+        if not metrics_df.empty:
+            st.subheader("Advanced metrics")
+            metrics_df = _render_analytics_schedule(
+                "Advanced metrics",
+                "advanced_metrics",
+                metrics_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            advanced["metrics"] = metrics_df.replace({pd.NA: None}).to_dict("records")
 
         st.subheader("Simulation builder")
         custom_defaults = copy.deepcopy(custom_definition_defaults)
@@ -1401,115 +1445,296 @@ def main() -> None:
 
         if not what_if_df.empty:
             st.subheader("What-if analysis")
-            st.dataframe(what_if_df, use_container_width=True, hide_index=True)
+            what_if_df = _render_analytics_schedule(
+                "What-if scenarios",
+                "what_if",
+                what_if_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            advanced["what_if"] = what_if_df.replace({pd.NA: None}).to_dict("records")
 
         if not scenario_df.empty:
             st.subheader("Scenario planning")
-            st.dataframe(scenario_df, use_container_width=True, hide_index=True)
+            scenario_df = _render_analytics_schedule(
+                "Scenario planning",
+                "scenario_planning",
+                scenario_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            advanced["scenario_planning"] = (
+                scenario_df.replace({pd.NA: None}).to_dict("records")
+            )
 
         if not monte_carlo_summary_df.empty:
             st.subheader("Monte Carlo summary")
-            st.dataframe(
+            monte_carlo_summary_df = _render_analytics_schedule(
+                "Monte Carlo summary",
+                "monte_carlo_summary",
                 monte_carlo_summary_df,
-                use_container_width=True,
-                hide_index=True,
+                selected_scenario,
+                namespace=analytics_namespace,
             )
+            summary_records = (
+                monte_carlo_summary_df.replace({pd.NA: None}).to_dict("records")
+            )
+            if summary_records:
+                monte_carlo.setdefault("summary", summary_records[0])
+
         if not monte_carlo_samples_df.empty:
+            st.subheader("Monte Carlo samples")
+            monte_carlo_samples_df = _render_analytics_schedule(
+                "Monte Carlo samples",
+                "monte_carlo_samples",
+                monte_carlo_samples_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            monte_carlo["samples"] = (
+                monte_carlo_samples_df.replace({pd.NA: None}).to_dict("records")
+            )
             st.caption("NPV distribution across Monte Carlo iterations")
             try:
-                st.line_chart(
+                chart_series = pd.to_numeric(
                     monte_carlo_samples_df.set_index("iteration")["npv"],
+                    errors="coerce",
                 )
+                st.line_chart(chart_series.dropna())
             except KeyError:
                 pass
-            st.dataframe(
-                monte_carlo_samples_df,
-                use_container_width=True,
-                hide_index=True,
-            )
 
         if not break_even_df.empty:
             st.subheader("Break-even analysis by product")
-            st.dataframe(break_even_df, use_container_width=True, hide_index=True)
+            break_even_df = _render_analytics_schedule(
+                "Break-even analysis",
+                "break_even",
+                break_even_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            advanced["break_even"] = (
+                break_even_df.replace({pd.NA: None}).to_dict("records")
+            )
 
         if goal_seek:
             st.subheader("Goal seek (target NPV)")
             goal_df = pd.DataFrame([goal_seek])
-            st.dataframe(goal_df, use_container_width=True, hide_index=True)
+            goal_df = _render_analytics_schedule(
+                "Goal seek",
+                "goal_seek",
+                goal_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            goal_records = goal_df.replace({pd.NA: None}).to_dict("records")
+            advanced["goal_seek"] = goal_records[0] if goal_records else {}
 
         if not dscr_df.empty:
             st.subheader("Debt service coverage ratio")
-            dscr_chart = dscr_df.set_index("year")
-            st.line_chart(dscr_chart)
+            dscr_df = _render_analytics_schedule(
+                "DSCR summary",
+                "dscr",
+                dscr_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            advanced["dscr"] = dscr_df.replace({pd.NA: None}).to_dict("records")
+            try:
+                dscr_chart = dscr_df.set_index("year")
+                dscr_chart = dscr_chart.apply(pd.to_numeric, errors="coerce")
+                st.line_chart(dscr_chart.dropna(how="all", axis=1))
+            except KeyError:
+                pass
 
         if not returns_df.empty:
             st.subheader("Return diagnostics")
-            returns_chart = returns_df.set_index("year")
-            st.line_chart(
-                returns_chart[[
-                    "return_on_assets",
-                    "return_on_equity",
-                    "return_on_invested_capital",
-                ]]
+            returns_df = _render_analytics_schedule(
+                "Return diagnostics",
+                "return_diagnostics",
+                returns_df,
+                selected_scenario,
+                namespace=analytics_namespace,
             )
-            st.dataframe(returns_df, use_container_width=True, hide_index=True)
+            advanced["returns"] = returns_df.replace({pd.NA: None}).to_dict("records")
+            try:
+                returns_chart = returns_df.set_index("year")
+                returns_chart = returns_chart.apply(pd.to_numeric, errors="coerce")
+                subset_cols = [
+                    col
+                    for col in [
+                        "return_on_assets",
+                        "return_on_equity",
+                        "return_on_invested_capital",
+                    ]
+                    if col in returns_chart.columns
+                ]
+                if subset_cols:
+                    st.line_chart(returns_chart[subset_cols].dropna(how="all"))
+            except KeyError:
+                pass
 
         if not coverage_df.empty:
             st.subheader("Coverage & resilience")
-            coverage_chart = coverage_df.set_index("year")
-            st.line_chart(
-                coverage_chart[[
-                    "interest_coverage",
-                    "fcf_to_debt_service",
-                    "maintenance_capex_coverage",
-                ]]
+            coverage_df = _render_analytics_schedule(
+                "Coverage & resilience",
+                "coverage",
+                coverage_df,
+                selected_scenario,
+                namespace=analytics_namespace,
             )
-            st.dataframe(coverage_df, use_container_width=True, hide_index=True)
+            advanced["coverage"] = (
+                coverage_df.replace({pd.NA: None}).to_dict("records")
+            )
+            try:
+                coverage_chart = coverage_df.set_index("year")
+                coverage_chart = coverage_chart.apply(pd.to_numeric, errors="coerce")
+                subset_cols = [
+                    col
+                    for col in [
+                        "interest_coverage",
+                        "fcf_to_debt_service",
+                        "maintenance_capex_coverage",
+                    ]
+                    if col in coverage_chart.columns
+                ]
+                if subset_cols:
+                    st.line_chart(coverage_chart[subset_cols].dropna(how="all"))
+            except KeyError:
+                pass
 
         if not leverage_df.empty:
             st.subheader("Leverage profile")
-            leverage_chart = leverage_df.set_index("year")
-            st.line_chart(leverage_chart[["debt_to_equity", "debt_ratio"]])
-            st.dataframe(leverage_df, use_container_width=True, hide_index=True)
+            leverage_df = _render_analytics_schedule(
+                "Leverage profile",
+                "leverage",
+                leverage_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            advanced["leverage"] = (
+                leverage_df.replace({pd.NA: None}).to_dict("records")
+            )
+            try:
+                leverage_chart = leverage_df.set_index("year")
+                leverage_chart = leverage_chart.apply(pd.to_numeric, errors="coerce")
+                subset_cols = [
+                    col
+                    for col in ["debt_to_equity", "debt_ratio"]
+                    if col in leverage_chart.columns
+                ]
+                if subset_cols:
+                    st.line_chart(leverage_chart[subset_cols].dropna(how="all"))
+            except KeyError:
+                pass
 
         if not trend_df.empty:
             st.subheader("Performance trends")
-            trend_chart = trend_df.set_index("year")[
-                ["revenue", "ebitda", "net_income", "free_cash_flow"]
-            ]
-            st.line_chart(trend_chart)
+            trend_df = _render_analytics_schedule(
+                "Performance trends",
+                "performance_trends",
+                trend_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            advanced["trend"] = trend_df.replace({pd.NA: None}).to_dict("records")
+            try:
+                trend_chart = trend_df.set_index("year")
+                trend_chart = trend_chart.apply(pd.to_numeric, errors="coerce")
+                subset_cols = [
+                    col
+                    for col in [
+                        "revenue",
+                        "ebitda",
+                        "net_income",
+                        "free_cash_flow",
+                    ]
+                    if col in trend_chart.columns
+                ]
+                if subset_cols:
+                    st.line_chart(trend_chart[subset_cols].dropna(how="all"))
+            except KeyError:
+                pass
 
         if not forecast_df.empty:
             st.subheader("Automated forecasting")
+            forecast_df = _render_analytics_schedule(
+                "Automated forecast",
+                "automated_forecast",
+                forecast_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            predictive.setdefault("automated_forecast", [])
+            predictive["automated_forecast"] = (
+                forecast_df.replace({pd.NA: None}).to_dict("records")
+            )
             try:
-                st.line_chart(
-                    forecast_df.set_index("Year")[
-                        ["Revenue forecast", "EBITDA forecast"]
-                    ]
-                )
+                forecast_chart = forecast_df.set_index("Year")
+                forecast_chart = forecast_chart.apply(pd.to_numeric, errors="coerce")
+                subset_cols = [
+                    col
+                    for col in ["Revenue forecast", "EBITDA forecast"]
+                    if col in forecast_chart.columns
+                ]
+                if subset_cols:
+                    st.line_chart(forecast_chart[subset_cols].dropna(how="all"))
             except KeyError:
                 pass
-            st.dataframe(forecast_df, use_container_width=True, hide_index=True)
 
         if not time_series_df.empty:
             st.subheader("Time series (AR(1)) outlook")
+            time_series_df = _render_analytics_schedule(
+                "Time series outlook",
+                "time_series",
+                time_series_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            predictive.setdefault("time_series", {}).setdefault("forecast", [])
+            predictive["time_series"]["forecast"] = (
+                time_series_df.replace({pd.NA: None}).to_dict("records")
+            )
             try:
-                st.line_chart(time_series_df.set_index("Year"))
+                time_series_chart = time_series_df.set_index("Year")
+                time_series_chart = time_series_chart.apply(pd.to_numeric, errors="coerce")
+                st.line_chart(time_series_chart.dropna(how="all"))
             except KeyError:
                 pass
-            st.dataframe(time_series_df, use_container_width=True, hide_index=True)
 
         if not risk_df.empty:
             st.subheader("Risk & anomaly detection")
+            risk_df = _render_analytics_schedule(
+                "Risk & anomalies",
+                "risk_anomalies",
+                risk_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            predictive.setdefault("risk_anomalies", {})
+            predictive["risk_anomalies"]["observations"] = (
+                risk_df.replace({pd.NA: None}).to_dict("records")
+            )
             st.caption(
                 f"Mean growth: {risk_metadata.get('mean_growth', float('nan')):.2%} — "
                 f"Std dev: {risk_metadata.get('std_growth', float('nan')):.2%}"
             )
-            st.dataframe(risk_df, use_container_width=True, hide_index=True)
 
         if not ml_methods_df.empty:
             st.subheader("ML method diagnostics")
-            st.dataframe(ml_methods_df, use_container_width=True, hide_index=True)
+            ml_methods_df = _render_analytics_schedule(
+                "ML methods",
+                "ml_methods",
+                ml_methods_df,
+                selected_scenario,
+                namespace=analytics_namespace,
+            )
+            predictive["ml_methods"] = (
+                ml_methods_df.replace({pd.NA: None}).to_dict("records")
+            )
+
+        advanced["monte_carlo"] = monte_carlo
+        advanced["predictive"] = predictive
 
     st.session_state.input_snapshot = copy.deepcopy(payload)
     scenario_store[selected_scenario] = payload

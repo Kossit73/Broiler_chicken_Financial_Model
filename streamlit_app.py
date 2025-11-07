@@ -691,12 +691,12 @@ def _render_schedule_editor(
     )
     instructions: List[str] = []
     if edit_enabled and ROW_EDIT_COLUMN in df.columns:
-        column_config[ROW_EDIT_COLUMN] = st.column_config.ButtonColumn(
+        column_config[ROW_EDIT_COLUMN] = st.column_config.CheckboxColumn(
             "Edit",
-            help="Open an inline form to edit this row's values.",
-            width="small",
+            help="Tick to open the inline row editor before saving.",
+            disabled=False,
         )
-        instructions.append("Click 'Edit' to open the row editor and save updates below.")
+        instructions.append("Tick 'Edit' to open the row editor and save updates below.")
     if edit_enabled and ROW_REMOVAL_COLUMN in df.columns:
         column_config[ROW_REMOVAL_COLUMN] = st.column_config.CheckboxColumn(
             "Remove",

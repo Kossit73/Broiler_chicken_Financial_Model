@@ -1504,7 +1504,6 @@ def main() -> None:
 
         if run_button:
             iterations = int(iterations_value)
-            st.session_state[iterations_key] = iterations
             with st.spinner("Running Monte Carlo simulation..."):
                 updated_mc = run_monte_carlo_analysis(
                     model.assumptions,

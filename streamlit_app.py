@@ -85,7 +85,16 @@ def _generate_excel_bytes(
 
         engine = "xlsxwriter"
     except ImportError:
-        engine = "openpyxl"
+        try:
+            import openpyxl  # type: ignore  # noqa: F401
+
+            engine = "openpyxl"
+        except ImportError as exc:  # pragma: no cover - surfaced in UI
+            st.error(
+                "Excel exports require either the `xlsxwriter` or `openpyxl` package. "
+                "Install one of these dependencies and try again."
+            )
+            raise RuntimeError("Missing Excel writer dependency") from exc
 
     with pd.ExcelWriter(buffer, engine=engine) as writer:
         assumptions_df = pd.DataFrame(results["assumptions_schedule"])
@@ -1255,10 +1264,16 @@ def main() -> None:
                     "Prepare Excel Model",
                     key=f"prepare_excel_{selected_scenario.lower()}",
                 ):
-                    with st.spinner("Preparing Excel workbook..."):
-                        excel_bytes = _generate_excel_bytes(model, results, selected_scenario)
-                    excel_map[selected_scenario] = excel_bytes
-                    st.session_state.excel_bytes_map = excel_map
+                    try:
+                        with st.spinner("Preparing Excel workbook..."):
+                            excel_bytes = _generate_excel_bytes(
+                                model, results, selected_scenario
+                            )
+                    except RuntimeError:
+                        excel_bytes = None
+                    else:
+                        excel_map[selected_scenario] = excel_bytes
+                        st.session_state.excel_bytes_map = excel_map
             if excel_bytes:
                 download_name = f"Broiler_Financial_Model_{selected_scenario.replace(' ', '_')}.xlsx"
                 st.download_button(

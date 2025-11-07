@@ -102,6 +102,26 @@ All values are expressed in US dollars except where otherwise noted.  Adjust the
 JSON/YAML file via the CLI) to model different operations—number of birds,
 pricing, debt structure, inflation, and more.
 
+## Testing & regression checks
+
+Run the automated suite to exercise both the unit-level calculators and an
+end-to-end CLI regression:
+
+```bash
+python -m unittest discover tests
+```
+
+The regression test launches `deployable_financial_model.py`, parses the
+generated outputs, and validates a set of baseline headline metrics. When using
+the shipped assumptions you should see results within the following ranges:
+
+- Net present value (`valuation.json`): approximately **-834k USD** (±1.5k).
+- Internal rate of return (`valuation.json`): approximately **-20.5%** (±1%).
+- Year 1 DSCR (`dscr_summary.csv`): approximately **0.90** (±0.02).
+
+If scenario changes drive materially different economics, update the documented
+thresholds alongside the regression test so future runs remain auditable.
+
 ## Interactive dashboard (optional)
 
 To experiment with the model in a browser-based UI, install the required

@@ -6,7 +6,7 @@ import copy
 from dataclasses import asdict, dataclass, is_dataclass
 from io import BytesIO
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -359,105 +359,83 @@ def _sanitize_key(label: str) -> str:
     return re.sub(r"[^0-9a-zA-Z_]+", "_", label.lower()).strip("_") or "schedule"
 
 
-def _row_label(df: pd.DataFrame, idx: int) -> str:
-    if "Period" in df.columns:
-        value = df.at[idx, "Period"]
-        if pd.notna(value) and str(value).strip():
-            return str(value)
-    return f"Row {idx + 1}"
+def _chunked(iterable: Iterable[Any], size: int) -> Iterable[List[Any]]:
+    chunk: List[Any] = []
+    for item in iterable:
+        chunk.append(item)
+        if len(chunk) == size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
-def _coerce_row_value(raw_value: Optional[str], series: pd.Series) -> Any:
-    if raw_value is None:
-        return None
-    text = str(raw_value).strip()
-    if text == "":
-        return None
+def _build_column_config(df: pd.DataFrame, *, disabled: bool, fixed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Create Streamlit column configuration based on series dtypes."""
 
-    # Detect boolean-like inputs first
-    lowered = text.lower()
-    if lowered in {"true", "false", "yes", "no", "y", "n", "1", "0"}:
-        if lowered in {"true", "yes", "y", "1"}:
-            return True
-        if lowered in {"false", "no", "n", "0"}:
-            return False
-
-    numeric_series = pd.to_numeric(series, errors="coerce")
-    if numeric_series.notna().sum() > 0:
-        parsed = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
-        if pd.notna(parsed):
-            if numeric_series.dropna().apply(lambda v: float(v).is_integer()).all():
-                return int(round(float(parsed)))
-            return float(parsed)
-
-    return raw_value
+    fixed = fixed or {}
+    config: Dict[str, Any] = {}
+    for column in df.columns:
+        col_disabled = disabled or column in fixed
+        series = df[column]
+        if pd.api.types.is_bool_dtype(series):
+            config[column] = st.column_config.CheckboxColumn(disabled=col_disabled)
+        elif pd.api.types.is_numeric_dtype(series):
+            config[column] = st.column_config.NumberColumn(disabled=col_disabled)
+        elif pd.api.types.is_datetime64_any_dtype(series):
+            config[column] = st.column_config.DatetimeColumn(disabled=col_disabled)
+        else:
+            config[column] = st.column_config.TextColumn(disabled=col_disabled)
+    return config
 
 
-def _render_row_editors(
-    df: pd.DataFrame,
+def _render_input_section(
+    title: str,
+    fields: List[Dict[str, Any]],
+    defaults: Assumptions,
+    values: Dict[str, Any],
     *,
-    original_columns: List[str],
-    fixed_columns: Dict[str, Any],
-    key_prefix: str,
-) -> Tuple[pd.DataFrame, bool]:
-    """Render per-row edit forms and return the updated DataFrame."""
+    columns: int = 3,
+) -> None:
+    """Render a consistently styled multi-column assumptions section."""
 
-    if df.empty:
-        return df, False
+    st.markdown(f"### {title}")
+    for group in _chunked(fields, columns):
+        cols = st.columns(len(group))
+        for widget, field in zip(cols, group):
+            attr = field["attr"]
+            label = field["label"]
+            dtype = field.get("type", "float")
+            min_value = field.get("min")
+            max_value = field.get("max")
+            step = field.get("step")
+            fmt = field.get("format")
+            help_text = field.get("help")
 
-    updated_df = df.copy()
-    changed = False
+            default_val = getattr(defaults, attr)
+            input_kwargs: Dict[str, Any] = {}
+            if help_text:
+                input_kwargs["help"] = help_text
 
-    st.markdown("##### Edit rows")
-    for idx in updated_df.index:
-        label = _row_label(updated_df, idx)
-        with st.expander(f"Edit {label}"):
-            form_key = f"form_{key_prefix}_{idx}"
-            with st.form(form_key):
-                pending_updates: Dict[str, Tuple[str, str]] = {}
-                for column in original_columns:
-                    current_value = updated_df.at[idx, column] if column in updated_df.columns else None
-                    display_value = "" if pd.isna(current_value) else str(current_value)
-                    widget_key = f"{form_key}_{column}"
-                    if column in fixed_columns:
-                        st.text_input(
-                            column,
-                            value=display_value,
-                            disabled=True,
-                            key=widget_key,
-                        )
-                        continue
-                    new_value = st.text_input(
-                        column,
-                        value=display_value,
-                        key=widget_key,
-                    )
-                    pending_updates[column] = (widget_key, new_value)
-
-                submitted = st.form_submit_button("Save row")
-
-            if submitted:
-                for column, (widget_key, raw) in pending_updates.items():
-                    target_series = (
-                        updated_df[column]
-                        if column in updated_df.columns
-                        else pd.Series(dtype="object")
-                    )
-                    coerced = _coerce_row_value(raw, target_series)
-                    if column in updated_df.columns:
-                        if (
-                            pd.api.types.is_string_dtype(updated_df[column].dtype)
-                            and not (coerced is None or isinstance(coerced, str))
-                        ):
-                            updated_df[column] = updated_df[column].astype("object")
-                        updated_df.at[idx, column] = coerced
-                for column, value in fixed_columns.items():
-                    if column in updated_df.columns:
-                        updated_df.at[idx, column] = value
-                changed = True
-                st.success(f"Saved changes for {label}.")
-
-    return updated_df, changed
+            if dtype == "int":
+                input_kwargs["value"] = int(default_val)
+                input_kwargs["step"] = int(step) if step is not None else 1
+                if min_value is not None:
+                    input_kwargs["min_value"] = int(min_value)
+                if max_value is not None:
+                    input_kwargs["max_value"] = int(max_value)
+                values[attr] = widget.number_input(label, **input_kwargs)
+            else:
+                input_kwargs["value"] = float(default_val)
+                if min_value is not None:
+                    input_kwargs["min_value"] = float(min_value)
+                if max_value is not None:
+                    input_kwargs["max_value"] = float(max_value)
+                if step is not None:
+                    input_kwargs["step"] = float(step)
+                if fmt is not None:
+                    input_kwargs["format"] = fmt
+                values[attr] = widget.number_input(label, **input_kwargs)
 
 
 def _render_schedule_editor(
@@ -572,10 +550,11 @@ def _render_schedule_editor(
 
     df = _ensure_fixed_columns(df, fixed_columns)
 
-    column_config: Dict[str, Any] = {}
-    if fixed_columns:
-        for column in fixed_columns:
-            column_config[column] = st.column_config.TextColumn(disabled=True)
+    column_config = _build_column_config(
+        df,
+        disabled=not edit_enabled,
+        fixed=fixed_columns,
+    )
 
     edited_df = st.data_editor(
         df,
@@ -591,18 +570,6 @@ def _render_schedule_editor(
     if auto_update_revenue:
         edited_df = _auto_compute_revenue(edited_df)
     edited_df = _ensure_fixed_columns(edited_df, fixed_columns)
-
-    if edit_enabled:
-        editor_key_prefix = f"{namespace}_{schedule_key}_{scenario}"
-        edited_df, row_changed = _render_row_editors(
-            edited_df,
-            original_columns=original_columns,
-            fixed_columns=fixed_columns,
-            key_prefix=editor_key_prefix,
-        )
-        if row_changed and auto_update_revenue:
-            edited_df = _auto_compute_revenue(edited_df)
-            edited_df = _ensure_fixed_columns(edited_df, fixed_columns)
 
     state["data"] = edited_df.replace({pd.NA: None}).to_dict("records")
     return edited_df.reindex(columns=original_columns, fill_value=None)
@@ -754,52 +721,7 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
 
     values: Dict[str, Any] = {}
 
-    def render_section(
-        title: str,
-        fields: List[Dict[str, Any]],
-        columns: int = 3,
-    ) -> None:
-        """Render a grouped section with evenly spaced inputs."""
-
-        with st.container():
-            st.markdown(f"### {title}")
-            cols = st.columns(columns)
-            for idx, field in enumerate(fields):
-                if idx % columns == 0 and idx != 0:
-                    cols = st.columns(columns)
-                col = cols[idx % columns]
-                attr = field["attr"]
-                label = field["label"]
-                dtype = field.get("type", "float")
-                min_value = field.get("min")
-                max_value = field.get("max")
-                step = field.get("step")
-                fmt = field.get("format")
-
-                default_val = getattr(defaults, attr)
-
-                input_kwargs: Dict[str, Any] = {}
-                if dtype == "int":
-                    input_kwargs["value"] = int(default_val)
-                    input_kwargs["step"] = int(step) if step is not None else 1
-                    if min_value is not None:
-                        input_kwargs["min_value"] = int(min_value)
-                    if max_value is not None:
-                        input_kwargs["max_value"] = int(max_value)
-                    values[attr] = col.number_input(label, **input_kwargs)
-                else:
-                    if min_value is not None:
-                        input_kwargs["min_value"] = float(min_value)
-                    if max_value is not None:
-                        input_kwargs["max_value"] = float(max_value)
-                    if step is not None:
-                        input_kwargs["step"] = float(step)
-                    if fmt is not None:
-                        input_kwargs["format"] = fmt
-                    input_kwargs["value"] = float(default_val)
-                    values[attr] = col.number_input(label, **input_kwargs)
-
-    render_section(
+    _render_input_section(
         "Production",
         [
             {"attr": "cycles_per_year", "label": "Cycles per year", "min": 1, "max": 12, "type": "int"},
@@ -837,7 +759,7 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         columns=4,
     )
 
-    render_section(
+    _render_input_section(
         "Pricing",
         [
             {
@@ -887,7 +809,7 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         columns=3,
     )
 
-    render_section(
+    _render_input_section(
         "Operating costs",
         [
             {
@@ -993,7 +915,7 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         columns=4,
     )
 
-    render_section(
+    _render_input_section(
         "Capital & financing",
         [
             {

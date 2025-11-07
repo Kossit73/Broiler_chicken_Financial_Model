@@ -1,6 +1,11 @@
+import csv
+import json
 import math
-import math
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from broiler_model.assumptions import Assumptions
 from broiler_model.model import generate_model_outputs
@@ -75,6 +80,39 @@ class AdvancedAnalyticsTests(unittest.TestCase):
         break_even_rows = analytics.get("break_even", [])
         if break_even_rows:
             self.assertIn("Direct cost", break_even_rows[0])
+
+
+class CLIBaselineRegressionTests(unittest.TestCase):
+    def test_cli_outputs_within_expected_ranges(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            cmd = [
+                sys.executable,
+                "deployable_financial_model.py",
+                "--out",
+                str(out_dir),
+                "--formats",
+                "csv",
+                "json",
+            ]
+            subprocess.run(cmd, check=True, cwd=repo_root)
+
+            valuation_path = out_dir / "valuation.json"
+            self.assertTrue(valuation_path.exists())
+            with valuation_path.open() as fh:
+                valuation = json.load(fh)
+
+            self.assertAlmostEqual(valuation["npv"], -834068.11, delta=1_500)
+            self.assertAlmostEqual(valuation["irr"], -0.2053, delta=0.01)
+
+            dscr_path = out_dir / "dscr_summary.csv"
+            self.assertTrue(dscr_path.exists())
+            with dscr_path.open() as fh:
+                reader = csv.DictReader(fh)
+                first_row = next(reader)
+
+            self.assertAlmostEqual(float(first_row["dscr"]), 0.8973, delta=0.02)
 
 
 if __name__ == "__main__":  # pragma: no cover

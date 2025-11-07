@@ -1039,7 +1039,11 @@ def run_monte_carlo_analysis(
         else float("nan"),
     }
 
-    return {"summary": summary, "samples": samples}
+    return {
+        "summary": summary,
+        "samples": samples,
+        "settings": {"iterations": iterations},
+    }
 
 
 def break_even_analysis(

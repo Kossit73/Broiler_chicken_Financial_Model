@@ -16,6 +16,7 @@ from deployable_financial_model import (
     Assumptions,
     DEFAULT_CUSTOM_SIMULATION_DEFINITIONS,
     generate_model_outputs,
+    run_monte_carlo_analysis,
     run_custom_simulations,
     summarise_revenue_totals,
 )
@@ -1469,33 +1470,67 @@ def main() -> None:
                 scenario_df.replace({pd.NA: None}).to_dict("records")
             )
 
+        monte_carlo_settings = monte_carlo.get("settings", {}) if isinstance(monte_carlo, dict) else {}
+        default_iterations = int(
+            monte_carlo_settings.get("iterations")
+            or (
+                int(monte_carlo_summary_df.iloc[0].get("iterations"))
+                if not monte_carlo_summary_df.empty
+                and pd.notna(monte_carlo_summary_df.iloc[0].get("iterations"))
+                else len(monte_carlo_samples_df) or 200
+            )
+        )
+        default_iterations = min(max(default_iterations, 1), 10000)
+
+        st.subheader("Monte Carlo simulation")
+        iterations_key = f"monte_carlo_iterations_{selected_scenario}"
+        if iterations_key not in st.session_state:
+            st.session_state[iterations_key] = default_iterations
+
+        iterations_value = st.number_input(
+            "Iterations",
+            min_value=1,
+            max_value=10000,
+            value=st.session_state[iterations_key],
+            step=50,
+            key=iterations_key,
+            help="Choose how many Monte Carlo iterations to run (1-10,000).",
+        )
+
+        run_button = st.button(
+            "Run Monte Carlo",
+            key=f"run_monte_carlo_{selected_scenario}",
+        )
+
+        if run_button:
+            iterations = int(iterations_value)
+            st.session_state[iterations_key] = iterations
+            with st.spinner("Running Monte Carlo simulation..."):
+                updated_mc = run_monte_carlo_analysis(
+                    model.assumptions,
+                    iterations=iterations,
+                )
+            monte_carlo = updated_mc
+            advanced["monte_carlo"] = updated_mc
+            results["advanced_analytics"]["monte_carlo"] = copy.deepcopy(updated_mc)
+            payload_cache = st.session_state.get("scenario_payloads", {})
+            if selected_scenario in payload_cache:
+                payload_cache[selected_scenario]["results"]["advanced_analytics"][
+                    "monte_carlo"
+                ] = copy.deepcopy(updated_mc)
+            monte_carlo_summary_df = pd.DataFrame([updated_mc.get("summary", {})])
+            monte_carlo_samples_df = pd.DataFrame(updated_mc.get("samples", []))
+            monte_carlo_settings = updated_mc.get("settings", {})
+
         if not monte_carlo_summary_df.empty:
-            st.subheader("Monte Carlo summary")
-            monte_carlo_summary_df = _render_analytics_schedule(
-                "Monte Carlo summary",
-                "monte_carlo_summary",
+            st.markdown("#### Summary")
+            st.dataframe(
                 monte_carlo_summary_df,
-                selected_scenario,
-                namespace=analytics_namespace,
+                use_container_width=True,
+                hide_index=True,
             )
-            summary_records = (
-                monte_carlo_summary_df.replace({pd.NA: None}).to_dict("records")
-            )
-            if summary_records:
-                monte_carlo.setdefault("summary", summary_records[0])
 
         if not monte_carlo_samples_df.empty:
-            st.subheader("Monte Carlo samples")
-            monte_carlo_samples_df = _render_analytics_schedule(
-                "Monte Carlo samples",
-                "monte_carlo_samples",
-                monte_carlo_samples_df,
-                selected_scenario,
-                namespace=analytics_namespace,
-            )
-            monte_carlo["samples"] = (
-                monte_carlo_samples_df.replace({pd.NA: None}).to_dict("records")
-            )
             st.caption("NPV distribution across Monte Carlo iterations")
             try:
                 chart_series = pd.to_numeric(

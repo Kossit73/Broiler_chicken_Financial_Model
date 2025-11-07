@@ -99,6 +99,38 @@ ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Financing", "Tax rate", "tax_rate"),
 ]
 
+
+DEFAULT_CUSTOM_SIMULATION_DEFINITIONS: List[Dict[str, Any]] = [
+    {
+        "Scenario": "Live price +5%",
+        "Description": "Increase live bird price per kg by 5%",
+        "Parameter": "live_price_per_kg",
+        "Change type": "percent",
+        "Change value": 5.0,
+    },
+    {
+        "Scenario": "Feed cost -5%",
+        "Description": "Reduce feed cost per kg by 5%",
+        "Parameter": "feed_cost_per_kg",
+        "Change type": "percent",
+        "Change value": -5.0,
+    },
+    {
+        "Scenario": "Mortality -1pp",
+        "Description": "Lower mortality rate by 1 percentage point",
+        "Parameter": "mortality_rate",
+        "Change type": "absolute",
+        "Change value": -0.01,
+    },
+    {
+        "Scenario": "Price growth target 3%",
+        "Description": "Set long-term price growth to 3%",
+        "Parameter": "price_growth",
+        "Change type": "target",
+        "Change value": 0.03,
+    },
+]
+
 REVENUE_CATEGORIES = [
     "Broiler Revenue",
     "Eggs Revenue",
@@ -853,6 +885,101 @@ def perform_what_if_analysis(
     return results
 
 
+def run_custom_simulations(
+    assumptions: Assumptions,
+    base_metrics: Dict[str, float],
+    definitions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Evaluate custom simulation definitions against the base assumptions."""
+
+    processed: List[Dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
+
+    base_entry = {
+        "Scenario": "Baseline",
+        "Description": "Unmodified assumptions",
+        "Parameter": "-",
+        "Change type": "-",
+        "Change value": 0.0,
+        "NPV": base_metrics.get("npv", float("nan")),
+        "NPV Δ": 0.0,
+        "IRR": base_metrics.get("irr", float("nan")),
+        "Avg DSCR": base_metrics.get("avg_dscr", float("nan")),
+        "Min DSCR": base_metrics.get("min_dscr", float("nan")),
+        "Payback": base_metrics.get("payback", float("nan")),
+    }
+    results.append(base_entry)
+
+    for definition in definitions:
+        if not isinstance(definition, dict):
+            continue
+
+        name = str(definition.get("Scenario") or definition.get("name") or "").strip()
+        parameter = str(
+            definition.get("Parameter") or definition.get("parameter") or ""
+        ).strip()
+        change_type = str(
+            definition.get("Change type")
+            or definition.get("change_type")
+            or "percent"
+        ).strip().lower()
+        change_value_raw = definition.get("Change value") or definition.get("change_value")
+        description = definition.get("Description") or definition.get("description") or ""
+
+        if not name or not parameter or not hasattr(assumptions, parameter):
+            continue
+
+        try:
+            change_value = float(change_value_raw)
+        except (TypeError, ValueError):
+            continue
+
+        current_value = getattr(assumptions, parameter)
+        if current_value is None:
+            continue
+
+        if change_type in {"percent", "percentage", "%"}:
+            mutated_value = current_value * (1.0 + change_value / 100.0)
+            applied_type = "percent"
+        elif change_type in {"absolute", "delta"}:
+            mutated_value = current_value + change_value
+            applied_type = "absolute"
+        elif change_type in {"target", "value"}:
+            mutated_value = change_value
+            applied_type = "target"
+        else:
+            # Unknown change type – skip this definition
+            continue
+
+        mutated = replace(assumptions, **{parameter: mutated_value})
+        metrics = _evaluate_case_metrics(mutated)["metrics"]
+        entry = {
+            "Scenario": name,
+            "Description": description,
+            "Parameter": parameter,
+            "Change type": applied_type,
+            "Change value": change_value,
+            "NPV": metrics["npv"],
+            "NPV Δ": metrics["npv"] - base_metrics.get("npv", 0.0),
+            "IRR": metrics["irr"],
+            "Avg DSCR": metrics["avg_dscr"],
+            "Min DSCR": metrics["min_dscr"],
+            "Payback": metrics["payback"],
+        }
+        results.append(entry)
+        processed.append(
+            {
+                "Scenario": name,
+                "Description": description,
+                "Parameter": parameter,
+                "Change type": applied_type,
+                "Change value": change_value,
+            }
+        )
+
+    return {"definitions": processed, "results": results}
+
+
 def run_monte_carlo_analysis(
     assumptions: Assumptions, iterations: int = 200
 ) -> Dict[str, Any]:
@@ -1418,6 +1545,10 @@ def compute_advanced_analytics(
             base_metrics,
             annual.revenue,
         ),
+        "custom_simulations": run_custom_simulations(
+            assumptions, base_metrics, DEFAULT_CUSTOM_SIMULATION_DEFINITIONS
+        ),
+        "base_metrics": base_metrics,
     }
 
 
@@ -1610,6 +1741,15 @@ def main() -> None:
         write_csv(
             output_dir / "scenario_planning.csv",
             advanced.get("scenario_planning", []),
+        )
+        custom_simulations = advanced.get("custom_simulations", {})
+        write_csv(
+            output_dir / "custom_simulation_definitions.csv",
+            custom_simulations.get("definitions", []),
+        )
+        write_csv(
+            output_dir / "custom_simulation_results.csv",
+            custom_simulations.get("results", []),
         )
         for category, rows in revenue_schedules.items():
             safe = (

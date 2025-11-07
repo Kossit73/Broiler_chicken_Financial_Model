@@ -51,9 +51,10 @@ The command creates the `outputs/` directory (if needed) and writes:
   `leverage_metrics.csv`, `what_if_analysis.csv`, `monte_carlo_summary.csv`,
   `monte_carlo_samples.csv`, `break_even_analysis.csv`, `goal_seek_results.csv`,
   `automated_forecast.csv`, `time_series_forecast.csv`, `risk_anomalies.csv`,
-  `ml_methods_summary.csv`, and `scenario_planning.csv` (plus consolidated
-  `advanced_analytics.json`) so you can reuse the richer analytics outside the
-  dashboard.
+  `ml_methods_summary.csv`, `scenario_planning.csv`,
+  `custom_simulation_definitions.csv`, and `custom_simulation_results.csv`
+  (plus consolidated `advanced_analytics.json`) so you can reuse the richer
+  analytics outside the dashboard.
 - Revenue schedule CSVs for each category (`broiler_revenue_schedule.csv`,
   `eggs_revenue_schedule.csv`, etc.) plus `revenue_schedules.json` capturing all
   five categories in one structure for downstream tooling.
@@ -101,7 +102,9 @@ refresh instantly. Below the metrics you will find three workspaces:
    automated/predictive forecasting (linear and AR(1) time-series), risk &
    anomaly detection, and ML method summaries with charts for DSCR, returns,
    coverage, leverage, and long-range revenue/EBITDA/net-income/free-cash-flow
-   trends.
+   trends. A **Simulation builder** lets you edit per-scenario rows (parameter,
+   change type, and magnitude) to run bespoke simulations directly in the
+   dashboard; the resulting table is exported via the CLI for offline analysis.
 
 The Production & revenues tab includes an **Excel export** card—click *Prepare
 Excel Model* to generate a multi-sheet workbook and download it directly from

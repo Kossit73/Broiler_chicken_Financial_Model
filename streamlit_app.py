@@ -14,7 +14,9 @@ from streamlit.delta_generator import DeltaGenerator
 
 from deployable_financial_model import (
     Assumptions,
+    DEFAULT_CUSTOM_SIMULATION_DEFINITIONS,
     generate_model_outputs,
+    run_custom_simulations,
     summarise_revenue_totals,
 )
 
@@ -1177,6 +1179,30 @@ def main() -> None:
     risk_df = pd.DataFrame(risk_metadata.get("observations", []))
     ml_methods_df = pd.DataFrame(predictive.get("ml_methods", []))
     scenario_df = pd.DataFrame(advanced.get("scenario_planning", []))
+    custom_simulations_data = advanced.get("custom_simulations", {})
+    custom_definition_defaults = custom_simulations_data.get("definitions")
+    if not custom_definition_defaults:
+        custom_definition_defaults = copy.deepcopy(
+            DEFAULT_CUSTOM_SIMULATION_DEFINITIONS
+        )
+    else:
+        custom_definition_defaults = copy.deepcopy(custom_definition_defaults)
+
+    metrics_lookup = metrics_df.set_index("metric")["value"] if not metrics_df.empty else pd.Series(dtype="float64")
+
+    def _metric_value(name: str) -> float:
+        try:
+            return float(metrics_lookup.get(name, float("nan")))
+        except Exception:
+            return float("nan")
+
+    base_metrics = advanced.get("base_metrics") or {
+        "npv": valuation.get("npv"),
+        "irr": valuation.get("irr"),
+        "avg_dscr": _metric_value("Average DSCR"),
+        "min_dscr": _metric_value("Minimum DSCR"),
+        "payback": _metric_value("Payback period (years)"),
+    }
 
     with production_tab:
         download_container = st.container()
@@ -1317,6 +1343,57 @@ def main() -> None:
     with analytics_tab:
         st.subheader("Advanced metrics")
         st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+
+        st.subheader("Simulation builder")
+        custom_defaults = copy.deepcopy(custom_definition_defaults)
+        custom_editor_df = _render_schedule_editor(
+            "Custom scenario definitions",
+            "custom_simulations",
+            custom_defaults,
+            selected_scenario,
+            namespace="custom_simulation_state",
+            row_defaults={
+                "Scenario": "New scenario",
+                "Description": "",
+                "Parameter": "",
+                "Change type": "percent",
+                "Change value": 0.0,
+            },
+            allow_yearly_increment=False,
+        )
+        custom_rows = (
+            custom_editor_df.replace({pd.NA: None}).to_dict("records")
+            if not custom_editor_df.empty
+            else []
+        )
+        simulation_payload = run_custom_simulations(
+            model.assumptions,
+            base_metrics,
+            custom_rows,
+        )
+        advanced["custom_simulations"] = simulation_payload
+        custom_state_store = st.session_state.setdefault("custom_simulation_state", {})
+        scenario_store_custom = custom_state_store.setdefault(selected_scenario, {})
+        schedule_state = scenario_store_custom.setdefault("custom_simulations", {})
+        schedule_state["data"] = copy.deepcopy(
+            simulation_payload.get("definitions", custom_rows)
+        )
+        schedule_state.setdefault("default", copy.deepcopy(custom_defaults))
+        custom_results_df = pd.DataFrame(simulation_payload.get("results", []))
+        if custom_rows:
+            valid_count = len(simulation_payload.get("definitions", []))
+            configured = sum(1 for row in custom_rows if row.get("Scenario"))
+            if valid_count < configured:
+                st.warning(
+                    "Some rows were skipped because the parameter name or change value "
+                    "could not be applied. Check the entries above and try again."
+                )
+        if not custom_results_df.empty:
+            st.dataframe(
+                custom_results_df,
+                use_container_width=True,
+                hide_index=True,
+            )
 
         if not what_if_df.empty:
             st.subheader("What-if analysis")

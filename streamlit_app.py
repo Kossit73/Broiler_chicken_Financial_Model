@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
 
-from broiler_model.assumptions import Assumptions
+from broiler_model.assumptions import Assumptions, ASSUMPTION_SCHEDULE_LAYOUT
 from broiler_model.analytics import (
     run_custom_simulations,
     run_monte_carlo_analysis,
@@ -33,6 +33,14 @@ DEFAULT_MONTE_CARLO_DISTRIBUTIONS = load_monte_carlo_distributions()
 
 ROW_REMOVAL_COLUMN = "Remove row"
 ROW_EDIT_COLUMN = "Edit row"
+
+
+_ASSUMPTION_LABEL_TO_KEY = {
+    label: key for _, label, key in ASSUMPTION_SCHEDULE_LAYOUT
+}
+_ASSUMPTION_FIELD_TYPES = {
+    name: field.type for name, field in Assumptions.__dataclass_fields__.items()
+}
 
 
 def _payload_to_ai_settings(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -270,6 +278,68 @@ def _initialise_schedule_state(
             state["default"] = copy.deepcopy(default_records)
     df = pd.DataFrame(state.get("data", default_records))
     return df, state
+
+
+def _coerce_assumption_value(key: str, raw_value: Any, current_value: Any) -> Any:
+    """Convert schedule entries back to the dataclass field types."""
+
+    if raw_value is None:
+        return current_value
+    if pd.isna(raw_value):  # type: ignore[arg-type]
+        return current_value
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if stripped == "":
+            return current_value
+        raw_value = stripped
+
+    target_type = _ASSUMPTION_FIELD_TYPES.get(key, type(current_value))
+
+    try:
+        if target_type is int:
+            return int(float(raw_value))
+        if target_type is float:
+            return float(raw_value)
+        return str(raw_value)
+    except (TypeError, ValueError):
+        return current_value
+
+
+def _assumptions_from_schedule(
+    rows: List[Dict[str, Any]],
+    current: Assumptions,
+) -> Optional[Assumptions]:
+    """Derive an updated ``Assumptions`` instance from schedule edits."""
+
+    updated_values = asdict(current)
+    changed = False
+
+    for row in rows:
+        item = row.get("item")
+        if not item:
+            continue
+        key = _ASSUMPTION_LABEL_TO_KEY.get(str(item))
+        if not key:
+            continue
+
+        existing = updated_values.get(key)
+        new_value = _coerce_assumption_value(key, row.get("value"), existing)
+
+        if isinstance(existing, float) and isinstance(new_value, float):
+            if math.isnan(existing) and math.isnan(new_value):
+                continue
+            if math.isclose(existing, new_value, rel_tol=1e-9, abs_tol=1e-9):
+                continue
+        elif existing == new_value:
+            continue
+
+        updated_values[key] = new_value
+        changed = True
+
+    if not changed:
+        return None
+
+    return Assumptions(**updated_values)
 
 
 def _next_period_label(df: pd.DataFrame) -> str:
@@ -1428,6 +1498,36 @@ def main() -> None:
                 updated_assumptions.append(merged)
         if updated_assumptions:
             results["assumptions_schedule"] = updated_assumptions
+            new_assumptions = _assumptions_from_schedule(
+                updated_assumptions, model.assumptions
+            )
+            if new_assumptions is not None:
+                payload["assumptions"] = asdict(new_assumptions)
+                scenario_store[selected_scenario]["assumptions"] = asdict(
+                    new_assumptions
+                )
+                st.session_state.snapshot_scenario = selected_scenario
+                st.session_state.input_snapshot = copy.deepcopy(payload)
+
+                updated_model = ScenarioModel(
+                    scenario=selected_scenario, assumptions=new_assumptions
+                )
+                updated_results = generate_model_outputs(new_assumptions)
+
+                scenario_payloads = st.session_state.setdefault(
+                    "scenario_payloads", {}
+                )
+                scenario_payloads[selected_scenario] = {
+                    "snapshot": copy.deepcopy(st.session_state.input_snapshot),
+                    "model": updated_model,
+                    "results": updated_results,
+                }
+                results = updated_results
+                st.session_state.model_results = (updated_model, updated_results)
+                st.success(
+                    "Assumption schedule edits applied. Recalculating model outputs..."
+                )
+                _rerun()
 
         st.subheader("Revenue schedules")
         updated_revenue: Dict[str, List[Dict[str, Any]]] = {}

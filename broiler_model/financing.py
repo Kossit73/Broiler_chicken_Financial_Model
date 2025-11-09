@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .assumptions import Assumptions
 from .production import AnnualSummary
@@ -30,6 +30,7 @@ class CashFlowRow:
     present_value: float
     ending_debt: float
     cumulative_cash: float
+    calendar_year: Optional[int] = None
 
 
 @dataclass
@@ -47,6 +48,7 @@ class IncomeStatementRow:
     net_income: float
     ebitda_margin: float
     net_margin: float
+    calendar_year: Optional[int] = None
 
 
 @dataclass
@@ -60,6 +62,7 @@ class BalanceSheetRow:
     equity: float
     retained_earnings: float
     debt_to_equity: float | None
+    calendar_year: Optional[int] = None
 
 
 @dataclass
@@ -70,6 +73,7 @@ class CashFlowStatementRow:
     financing_cash_flow: float
     net_change_in_cash: float
     ending_cash: float
+    calendar_year: Optional[int] = None
 
 
 def _pmt(rate: float, term_years: int, principal: float) -> float:
@@ -119,6 +123,7 @@ def discounted_cash_flow(
     revenue = base_annual.revenue
     upfront_cash = -(equity + assumptions.working_capital)
     cumulative_cash = upfront_cash
+    start_year = int(assumptions.production_start_year) if assumptions.production_start_year else 0
     rows.append(
         CashFlowRow(
             year=0,
@@ -140,6 +145,7 @@ def discounted_cash_flow(
             present_value=upfront_cash,
             ending_debt=debt,
             cumulative_cash=cumulative_cash,
+            calendar_year=start_year - 1 if start_year else None,
         )
     )
 
@@ -208,8 +214,14 @@ def discounted_cash_flow(
                 present_value=present_value,
                 ending_debt=ending_balance,
                 cumulative_cash=cumulative_cash,
+                calendar_year=start_year + year - 1 if start_year else None,
             )
         )
+
+    if start_year:
+        for entry in loan_schedule:
+            year_value = int(entry.get("year", 0))
+            entry["calendar_year"] = start_year + year_value - 1 if year_value else start_year
 
     return rows, loan_schedule
 
@@ -234,6 +246,8 @@ def build_financial_statements(
     financing_cash = equity_total + (total_capex * assumptions.debt_ratio)
     net_change = investing_cash + financing_cash
     cash_balance = net_change
+    start_year = int(assumptions.production_start_year) if assumptions.production_start_year else 0
+
     cash_statement.append(
         CashFlowStatementRow(
             year=0,
@@ -242,6 +256,7 @@ def build_financial_statements(
             financing_cash_flow=financing_cash,
             net_change_in_cash=net_change,
             ending_cash=cash_balance,
+            calendar_year=start_year - 1 if start_year else None,
         )
     )
 
@@ -264,6 +279,7 @@ def build_financial_statements(
                         if equity_total
                         else None
                     ),
+                    calendar_year=start_year - 1 if start_year else None,
                 )
             )
             continue
@@ -285,6 +301,7 @@ def build_financial_statements(
                 net_income=row.net_income,
                 ebitda_margin=(row.ebitda / row.revenue) if row.revenue else 0.0,
                 net_margin=(row.net_income / row.revenue) if row.revenue else 0.0,
+                calendar_year=row.calendar_year,
             )
         )
 
@@ -301,6 +318,7 @@ def build_financial_statements(
                 financing_cash_flow=financing_cash,
                 net_change_in_cash=net_change,
                 ending_cash=cash_balance,
+                calendar_year=row.calendar_year,
             )
         )
 
@@ -322,6 +340,7 @@ def build_financial_statements(
                 equity=equity,
                 retained_earnings=retained,
                 debt_to_equity=debt_to_equity,
+                calendar_year=row.calendar_year,
             )
         )
 

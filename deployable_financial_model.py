@@ -252,11 +252,18 @@ def main() -> None:
     _export_csv(output_dir, args.formats, assumptions, results)
     _export_json(output_dir, args.formats, assumptions, results)
 
+    timeline = results.get("timeline", {})
     write_json(
         output_dir / "manifest.json",
         {
             "cycles_per_year": assumptions.cycles_per_year,
+            "production_start_year": assumptions.production_start_year,
             "production_horizon_years": assumptions.production_horizon_years,
+            "production_end_year": timeline.get(
+                "end_year",
+                assumptions.production_start_year
+                + max(assumptions.production_horizon_years - 1, 0),
+            ),
             "years": len(results["cashflows"]) - 1,
             "files": sorted(p.name for p in output_dir.iterdir() if p.is_file()),
         },

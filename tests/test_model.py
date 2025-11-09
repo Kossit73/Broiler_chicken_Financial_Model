@@ -44,6 +44,7 @@ class AdvancedAnalyticsTests(unittest.TestCase):
             revenue_schedules,
             assumptions.cycles_per_year,
             assumptions.production_horizon_years,
+            assumptions.production_start_year,
         )
         financials = build_financial_statements(assumptions, cashflows, loan_schedule)
 

@@ -1592,6 +1592,13 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         [
             {"attr": "cycles_per_year", "label": "Cycles per year", "min": 1, "max": 12, "type": "int"},
             {
+                "attr": "production_start_year",
+                "label": "Production start year",
+                "min": 1900,
+                "max": 2100,
+                "type": "int",
+            },
+            {
                 "attr": "production_horizon_years",
                 "label": "Production horizon (years)",
                 "min": 1,
@@ -1626,6 +1633,15 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         values,
         columns=4,
     )
+
+    start_year = int(values.get("production_start_year", defaults.production_start_year))
+    horizon_years = int(values.get("production_horizon_years", defaults.production_horizon_years))
+    if horizon_years <= 0:
+        horizon_years = 1
+    end_year = start_year + horizon_years - 1
+    timeline_cols = st.columns(2)
+    timeline_cols[0].metric("Production start year", start_year)
+    timeline_cols[1].metric("Production end year", end_year)
 
     _render_input_section(
         "Pricing",
@@ -1872,6 +1888,7 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
     return Assumptions(
         farm_name=farm_name,
         cycles_per_year=int(values["cycles_per_year"]),
+        production_start_year=int(values["production_start_year"]),
         production_horizon_years=int(values["production_horizon_years"]),
         birds_per_cycle=int(values["birds_per_cycle"]),
         mortality_rate=float(values["mortality_rate"]),
@@ -1970,6 +1987,7 @@ def main() -> None:
             revenue_schedules,
             model.assumptions.cycles_per_year,
             model.assumptions.production_horizon_years,
+            model.assumptions.production_start_year,
         ),
     )
     financials = results["financial_statements"]
@@ -2167,6 +2185,7 @@ def main() -> None:
                 revenue_schedules,
                 model.assumptions.cycles_per_year,
                 model.assumptions.production_horizon_years,
+                model.assumptions.production_start_year,
             )
             results["revenue_summary"] = revenue_summary
 

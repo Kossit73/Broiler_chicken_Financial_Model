@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 class Assumptions:
     farm_name: str = "Baseline Broiler Farm"
     cycles_per_year: int = 6
+    production_start_year: int = 2025
     production_horizon_years: int = 10
     birds_per_cycle: int = 20000
     mortality_rate: float = 0.05
@@ -49,6 +50,7 @@ class Assumptions:
 ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Production", "Farm name", "farm_name"),
     ("Production", "Cycles per year", "cycles_per_year"),
+    ("Production", "Production start year", "production_start_year"),
     ("Production", "Production horizon (years)", "production_horizon_years"),
     ("Production", "Birds placed per cycle", "birds_per_cycle"),
     ("Production", "Mortality rate", "mortality_rate"),
@@ -99,6 +101,12 @@ def build_assumptions_schedule(assumptions: Assumptions) -> List[Dict[str, Any]]
     """Return a tabular schedule summarising model assumptions grouped by schedule."""
 
     raw = asdict(assumptions)
+    start_year = int(raw.get("production_start_year", 0) or 0)
+    horizon_years = int(raw.get("production_horizon_years", 0) or 0)
+    if horizon_years <= 0:
+        horizon_years = 1
+    end_year = start_year + horizon_years - 1 if start_year else horizon_years
+    raw["production_end_year"] = end_year
     schedule_rows: List[Dict[str, Any]] = []
     for schedule, label, key in ASSUMPTION_SCHEDULE_LAYOUT:
         schedule_rows.append(
@@ -108,4 +116,11 @@ def build_assumptions_schedule(assumptions: Assumptions) -> List[Dict[str, Any]]
                 "value": raw.get(key),
             }
         )
+    schedule_rows.append(
+        {
+            "schedule": "Production",
+            "item": "Production end year",
+            "value": raw.get("production_end_year"),
+        }
+    )
     return schedule_rows

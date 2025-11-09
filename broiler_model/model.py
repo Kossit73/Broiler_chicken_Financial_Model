@@ -68,7 +68,14 @@ def generate_model_outputs(
         revenue_schedules,
         assumptions.cycles_per_year,
         assumptions.production_horizon_years,
+        assumptions.production_start_year,
     )
+    timeline = {
+        "start_year": assumptions.production_start_year,
+        "end_year": assumptions.production_start_year
+        + max(assumptions.production_horizon_years - 1, 0),
+        "projection_years": max(assumptions.production_horizon_years, 1),
+    }
     financials = build_financial_statements(assumptions, cashflows, loan_schedule)
     advanced = compute_advanced_analytics(
         assumptions,
@@ -87,12 +94,14 @@ def generate_model_outputs(
     model_npv = npv(discount_rate, valuation_cashflows)
     model_irr = irr(valuation_cashflows)
 
+    terminal_row = cashflows[-1] if cashflows else None
     valuation = {
         "discount_rate": discount_rate,
         "npv": model_npv,
         "irr": model_irr,
         "initial_investment": cashflows[0].free_cash_flow,
-        "terminal_year": cashflows[-1].year,
+        "terminal_year": terminal_row.year if terminal_row else None,
+        "terminal_calendar_year": terminal_row.calendar_year if terminal_row else None,
     }
 
     return {
@@ -104,6 +113,7 @@ def generate_model_outputs(
         "revenue_schedules": revenue_schedules,
         "revenue_summary": revenue_summary,
         "valuation": valuation,
+        "timeline": timeline,
         "financial_statements": financials,
         "advanced_analytics": advanced,
     }

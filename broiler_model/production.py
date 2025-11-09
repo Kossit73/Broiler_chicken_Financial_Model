@@ -158,7 +158,7 @@ def annual_summary(
 
     ebit = totals["ebitda"] - depreciation
     return AnnualSummary(
-        year=1,
+        year=int(assumptions.production_start_year),
         revenue=totals["revenue"],
         feed_cost=totals["feed_cost"],
         chick_cost=totals["chick_cost"],
@@ -226,6 +226,7 @@ def summarise_revenue_totals(
     revenue_schedules: Dict[str, List[Dict[str, Any]]],
     cycles_per_year: int,
     projection_years: int,
+    start_year: int,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Aggregate revenue schedules into annual totals per category and overall."""
 
@@ -235,6 +236,7 @@ def summarise_revenue_totals(
     cycles = max(cycles, 1)
     years = int(projection_years) if projection_years else 0
     years = max(years, 1)
+    base_year = int(start_year) if start_year else 0
 
     for category, rows in revenue_schedules.items():
         if not rows:
@@ -260,18 +262,45 @@ def summarise_revenue_totals(
             year = (idx // cycles) + 1
             category_totals[year] = category_totals.get(year, 0.0) + value
 
-        for year, total in sorted(category_totals.items()):
+        for year_index, total in sorted(category_totals.items()):
             total_float = float(total)
-            per_category.append(
-                {"Category": category, "Year": int(year), "Revenue": total_float}
+            calendar_year = (
+                base_year + year_index - 1 if base_year else year_index
             )
-            per_year_totals[year] = per_year_totals.get(year, 0.0) + total_float
+            per_category.append(
+                {
+                    "Category": category,
+                    "Period": int(year_index),
+                    "Year": int(calendar_year),
+                    "Revenue": total_float,
+                }
+            )
+            per_year_totals[year_index] = (
+                per_year_totals.get(year_index, 0.0) + total_float
+            )
 
     annual_totals: List[Dict[str, Any]] = []
     max_year = max(per_year_totals.keys(), default=0)
     horizon = max(years, max_year)
-    for year in range(1, horizon + 1):
-        total = per_year_totals.get(year, 0.0)
-        annual_totals.append({"Year": year, "Revenue": float(total)})
+    for year_index in range(1, horizon + 1):
+        total = per_year_totals.get(year_index, 0.0)
+        calendar_year = base_year + year_index - 1 if base_year else year_index
+        annual_totals.append(
+            {
+                "Period": int(year_index),
+                "Year": int(calendar_year),
+                "Revenue": float(total),
+            }
+        )
 
-    return {"by_category": per_category, "annual_totals": annual_totals}
+    timeline = {
+        "start_year": base_year if base_year else 1,
+        "end_year": (base_year + horizon - 1) if base_year else horizon,
+        "projection_years": horizon,
+    }
+
+    return {
+        "by_category": per_category,
+        "annual_totals": annual_totals,
+        "timeline": timeline,
+    }

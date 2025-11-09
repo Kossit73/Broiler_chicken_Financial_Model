@@ -91,11 +91,15 @@ The command creates the `outputs/` directory (if needed) and writes:
   `eggs_revenue_schedule.csv`, etc.) plus `revenue_schedules.json` capturing all
   five categories in one structure for downstream tooling.
 - `revenue_summary_by_category.csv`, `revenue_summary_annual.csv`, and
-  `revenue_summary.json` – Year-by-year revenue totals ensuring annual figures
-  tie directly to the summed cycle-level schedules.
-- `valuation.json` – NPV/IRR results using the modeled cash flows.
+  `revenue_summary.json` – Year-by-year revenue totals (with both period index
+  and calendar year columns) ensuring annual figures tie directly to the summed
+  cycle-level schedules.
+- `valuation.json` – NPV/IRR results using the modeled cash flows. The payload
+  now includes both the relative terminal year and the corresponding calendar
+  year based on the configured production start.
 - `manifest.json` – convenience listing of the generated files plus the cycles
-  per year and production horizon captured in the run.
+  per year, production start year, horizon, and computed end year captured in
+  the run.
 
 All values are expressed in US dollars except where otherwise noted.  Adjust the
 `Assumptions` dataclass in `broiler_model/assumptions.py` (or load a customised
@@ -134,10 +138,12 @@ streamlit run streamlit_app.py
 
 The dashboard now presents all inputs on a single **Input Landing Page** that
 groups controls into Production, Pricing, Costs, and Capital & financing
-sections. The refreshed Pricing block now exposes dedicated inputs for broiler,
-egg, manure, live-bird, and by-product prices alongside the annual price growth
-assumption so each revenue stream can be tuned individually. A scenario selector
-at the top lets you maintain alternative
+sections. The Production block captures the production start year in addition to
+the horizon and surfaces the computed end year so the projection timeline stays
+front-and-centre. The refreshed Pricing block now exposes dedicated inputs for
+broiler, egg, manure, live-bird, and by-product prices alongside the annual
+price growth assumption so each revenue stream can be tuned individually. A
+scenario selector at the top lets you maintain alternative
 assumption sets (Baseline, Expansion, Downside) without losing previous
 configurations. As you tweak values, the NPV/IRR metrics and detailed tables
 refresh instantly. Below the metrics you will find three workspaces:

@@ -17,8 +17,13 @@ from streamlit.delta_generator import DeltaGenerator
 
 from broiler_model.assumptions import Assumptions, ASSUMPTION_SCHEDULE_LAYOUT
 from broiler_model.analytics import (
+    break_even_analysis,
+    build_predictive_analytics,
+    goal_seek_live_price,
+    perform_what_if_analysis,
     run_custom_simulations,
     run_monte_carlo_analysis,
+    scenario_planning,
 )
 from broiler_model.config import (
     load_custom_simulation_definitions,
@@ -51,6 +56,17 @@ def _to_numeric(series: pd.Series) -> pd.Series:
     """Coerce a pandas Series to numeric values where possible."""
 
     return pd.to_numeric(series, errors="coerce")
+
+
+def _records_match(left: Iterable[Dict[str, Any]], right: Iterable[Dict[str, Any]]) -> bool:
+    """Return ``True`` when two iterable collections of mapping-like rows match."""
+
+    try:
+        left_serialised = json.dumps(list(left), sort_keys=True)
+        right_serialised = json.dumps(list(right), sort_keys=True)
+    except TypeError:
+        return False
+    return left_serialised == right_serialised
 
 
 def _build_revenue_stack_chart(summary_df: pd.DataFrame) -> Optional[alt.Chart]:
@@ -1999,7 +2015,8 @@ def main() -> None:
     col3.metric("Discount rate", f"{valuation['discount_rate']:.2%}")
 
     cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])
-    annual_df = pd.DataFrame([asdict(results["annual"])])
+    annual_summary_obj = results["annual"]
+    annual_df = pd.DataFrame([asdict(annual_summary_obj)])
     cashflow_df = pd.DataFrame([asdict(row) for row in results["cashflows"]])
     cashflow_bridge_frames = _prepare_cashflow_bridge_frames(cashflow_df)
     income_df = pd.DataFrame([asdict(row) for row in financials["income_statement"]])
@@ -2292,23 +2309,57 @@ def main() -> None:
             else []
         )
         simulation_inputs = custom_rows or copy.deepcopy(custom_definition_defaults)
-        simulation_payload = run_custom_simulations(
-            model.assumptions,
-            base_metrics,
-            simulation_inputs,
+        stored_payload = custom_simulations_data or {}
+        stored_definitions = stored_payload.get("definitions", [])
+        run_custom_button = st.button(
+            "Run custom simulations",
+            key=f"run_custom_simulations_{selected_scenario}",
+            help="Recalculate the scenarios above with the current definitions.",
         )
-        advanced["custom_simulations"] = simulation_payload
-        advanced["custom_simulation_definitions"] = copy.deepcopy(simulation_inputs)
+
+        simulation_payload = stored_payload
+        if run_custom_button:
+            with st.spinner("Running custom simulations..."):
+                simulation_payload = run_custom_simulations(
+                    model.assumptions,
+                    base_metrics,
+                    simulation_inputs,
+                )
+            custom_simulations_data = simulation_payload
+            advanced["custom_simulations"] = simulation_payload
+            advanced["custom_simulation_definitions"] = copy.deepcopy(simulation_inputs)
+            results["advanced_analytics"]["custom_simulations"] = copy.deepcopy(
+                simulation_payload
+            )
+            results["advanced_analytics"][
+                "custom_simulation_definitions"
+            ] = copy.deepcopy(simulation_inputs)
+            payload_cache = st.session_state.get("scenario_payloads", {})
+            if selected_scenario in payload_cache:
+                payload_cache[selected_scenario]["results"]["advanced_analytics"][
+                    "custom_simulations"
+                ] = copy.deepcopy(simulation_payload)
+                payload_cache[selected_scenario]["results"]["advanced_analytics"][
+                    "custom_simulation_definitions"
+                ] = copy.deepcopy(simulation_inputs)
+        else:
+            if not _records_match(simulation_inputs, stored_definitions):
+                st.info(
+                    "Definitions changed. Click **Run custom simulations** to refresh the "
+                    "results below."
+                )
+
         custom_state_store = st.session_state.setdefault("custom_simulation_state", {})
         scenario_store_custom = custom_state_store.setdefault(selected_scenario, {})
         schedule_state = scenario_store_custom.setdefault("custom_simulations", {})
         schedule_state["data"] = copy.deepcopy(simulation_inputs)
         schedule_state.setdefault("default", copy.deepcopy(custom_defaults))
+
         custom_results_df = pd.DataFrame(simulation_payload.get("results", []))
         if custom_rows:
             valid_count = len(simulation_payload.get("definitions", []))
             configured = sum(1 for row in custom_rows if row.get("Scenario"))
-            if valid_count < configured:
+            if run_custom_button and valid_count < configured:
                 st.warning(
                     "Some rows were skipped because the parameter name or change value "
                     "could not be applied. Check the entries above and try again."
@@ -2340,8 +2391,32 @@ def main() -> None:
                 except KeyError:
                     pass
 
-        if not what_if_df.empty:
-            st.subheader("What-if analysis")
+        st.subheader("What-if analysis")
+        run_what_if = st.button(
+            "Run what-if analysis",
+            key=f"run_what_if_{selected_scenario}",
+            help="Recompute the what-if scenarios using the latest assumptions.",
+        )
+        if run_what_if:
+            with st.spinner("Running what-if scenarios..."):
+                what_if_rows = perform_what_if_analysis(
+                    model.assumptions,
+                    base_metrics,
+                )
+            what_if_df = pd.DataFrame(what_if_rows)
+            advanced["what_if"] = what_if_rows
+            results["advanced_analytics"]["what_if"] = copy.deepcopy(what_if_rows)
+            payload_cache = st.session_state.get("scenario_payloads", {})
+            if selected_scenario in payload_cache:
+                payload_cache[selected_scenario]["results"]["advanced_analytics"][
+                    "what_if"
+                ] = copy.deepcopy(what_if_rows)
+        if what_if_df.empty:
+            st.info(
+                "No what-if scenarios available yet. Click **Run what-if analysis** to "
+                "generate the table."
+            )
+        else:
             what_if_df = _render_analytics_schedule(
                 "What-if scenarios",
                 "what_if",
@@ -2351,8 +2426,35 @@ def main() -> None:
             )
             advanced["what_if"] = what_if_df.replace({pd.NA: None}).to_dict("records")
 
-        if not scenario_df.empty:
-            st.subheader("Scenario planning")
+        st.subheader("Scenario planning")
+        run_scenario_planning = st.button(
+            "Run scenario planning",
+            key=f"run_scenario_planning_{selected_scenario}",
+            help="Recalculate Downside, Upside, and Expansion scenarios.",
+        )
+        if run_scenario_planning:
+            with st.spinner("Evaluating planning scenarios..."):
+                scenario_rows = scenario_planning(
+                    model.assumptions,
+                    base_metrics,
+                    getattr(annual_summary_obj, "revenue", 0.0),
+                )
+            scenario_df = pd.DataFrame(scenario_rows)
+            advanced["scenario_planning"] = scenario_rows
+            results["advanced_analytics"]["scenario_planning"] = copy.deepcopy(
+                scenario_rows
+            )
+            payload_cache = st.session_state.get("scenario_payloads", {})
+            if selected_scenario in payload_cache:
+                payload_cache[selected_scenario]["results"]["advanced_analytics"][
+                    "scenario_planning"
+                ] = copy.deepcopy(scenario_rows)
+        if scenario_df.empty:
+            st.info(
+                "No scenario planning results yet. Click **Run scenario planning** to "
+                "evaluate alternative cases."
+            )
+        else:
             scenario_df = _render_analytics_schedule(
                 "Scenario planning",
                 "scenario_planning",
@@ -2467,8 +2569,33 @@ def main() -> None:
                 st.markdown(f"**{label} distribution**")
                 st.altair_chart(chart, use_container_width=True)
 
-        if not break_even_df.empty:
-            st.subheader("Break-even analysis by product")
+        st.subheader("Break-even analysis by product")
+        run_break_even = st.button(
+            "Run break-even analysis",
+            key=f"run_break_even_{selected_scenario}",
+            help="Rebuild the break-even schedule using current revenue inputs.",
+        )
+        if run_break_even:
+            with st.spinner("Calculating break-even metrics..."):
+                break_even_rows = break_even_analysis(
+                    annual_summary_obj,
+                    revenue_summary,
+                    revenue_schedules,
+                )
+            break_even_df = pd.DataFrame(break_even_rows)
+            advanced["break_even"] = break_even_rows
+            results["advanced_analytics"]["break_even"] = copy.deepcopy(break_even_rows)
+            payload_cache = st.session_state.get("scenario_payloads", {})
+            if selected_scenario in payload_cache:
+                payload_cache[selected_scenario]["results"]["advanced_analytics"][
+                    "break_even"
+                ] = copy.deepcopy(break_even_rows)
+        if break_even_df.empty:
+            st.info(
+                "No break-even schedule is available. Click **Run break-even analysis** to "
+                "generate the table."
+            )
+        else:
             break_even_df = _render_analytics_schedule(
                 "Break-even analysis",
                 "break_even",
@@ -2485,9 +2612,29 @@ def main() -> None:
             if units_chart is not None:
                 st.altair_chart(units_chart, use_container_width=True)
 
-        if goal_seek:
-            st.subheader("Goal seek (target NPV)")
-            goal_df = pd.DataFrame([goal_seek])
+        st.subheader("Goal seek (target NPV)")
+        run_goal_seek = st.button(
+            "Run goal seek",
+            key=f"run_goal_seek_{selected_scenario}",
+            help="Solve for the live price per kg that delivers zero NPV.",
+        )
+        if run_goal_seek:
+            with st.spinner("Running goal seek..."):
+                goal_seek = goal_seek_live_price(model.assumptions)
+            advanced["goal_seek"] = goal_seek
+            results["advanced_analytics"]["goal_seek"] = copy.deepcopy(goal_seek)
+            payload_cache = st.session_state.get("scenario_payloads", {})
+            if selected_scenario in payload_cache:
+                payload_cache[selected_scenario]["results"]["advanced_analytics"][
+                    "goal_seek"
+                ] = copy.deepcopy(goal_seek)
+        goal_df = pd.DataFrame([goal_seek]) if goal_seek else pd.DataFrame()
+        if goal_df.empty:
+            st.info(
+                "No goal seek result yet. Click **Run goal seek** to calculate the target "
+                "price."
+            )
+        else:
             goal_df = _render_analytics_schedule(
                 "Goal seek",
                 "goal_seek",
@@ -2597,8 +2744,46 @@ def main() -> None:
             except KeyError:
                 pass
 
+        st.subheader("Predictive analytics")
+        run_predictive = st.button(
+            "Run predictive analytics",
+            key=f"run_predictive_{selected_scenario}",
+            help="Refresh automated forecasts, time-series projections, and risk checks.",
+        )
+        if run_predictive:
+            with st.spinner("Recomputing predictive analytics..."):
+                predictive = build_predictive_analytics(
+                    results["cashflows"],
+                    financials["income_statement"],
+                )
+            advanced["predictive"] = predictive
+            results["advanced_analytics"]["predictive"] = copy.deepcopy(predictive)
+            payload_cache = st.session_state.get("scenario_payloads", {})
+            if selected_scenario in payload_cache:
+                payload_cache[selected_scenario]["results"]["advanced_analytics"][
+                    "predictive"
+                ] = copy.deepcopy(predictive)
+        forecast_df = pd.DataFrame(predictive.get("automated_forecast", []))
+        time_series_df = pd.DataFrame(
+            predictive.get("time_series", {}).get("forecast", [])
+        )
+        risk_metadata = predictive.get("risk_anomalies", {})
+        risk_df = pd.DataFrame(risk_metadata.get("observations", []))
+        ml_methods_df = pd.DataFrame(predictive.get("ml_methods", []))
+
+        if (
+            forecast_df.empty
+            and time_series_df.empty
+            and risk_df.empty
+            and ml_methods_df.empty
+        ):
+            st.info(
+                "No predictive analytics available. Click **Run predictive analytics** to "
+                "generate forecasts and anomaly checks."
+            )
+
         if not forecast_df.empty:
-            st.subheader("Automated forecasting")
+            st.markdown("##### Automated forecasting")
             forecast_df = _render_analytics_schedule(
                 "Automated forecast",
                 "automated_forecast",
@@ -2624,7 +2809,7 @@ def main() -> None:
                 pass
 
         if not time_series_df.empty:
-            st.subheader("Time series (AR(1)) outlook")
+            st.markdown("##### Time series (AR(1)) outlook")
             time_series_df = _render_analytics_schedule(
                 "Time series outlook",
                 "time_series",
@@ -2644,7 +2829,7 @@ def main() -> None:
                 pass
 
         if not risk_df.empty:
-            st.subheader("Risk & anomaly detection")
+            st.markdown("##### Risk & anomaly detection")
             risk_df = _render_analytics_schedule(
                 "Risk & anomalies",
                 "risk_anomalies",
@@ -2670,7 +2855,7 @@ def main() -> None:
             st.altair_chart(overlay_chart, use_container_width=True)
 
         if not ml_methods_df.empty:
-            st.subheader("ML method diagnostics")
+            st.markdown("##### ML method diagnostics")
             ml_methods_df = _render_analytics_schedule(
                 "ML methods",
                 "ml_methods",

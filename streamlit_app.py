@@ -657,6 +657,13 @@ def _ai_settings_to_payload(settings: Dict[str, Any], payload: Dict[str, Any]) -
 def _rerun() -> None:
     """Trigger a Streamlit rerun."""
 
+    if hasattr(st, "rerun"):
+        try:
+            st.rerun()
+            return
+        except Exception:
+            pass
+    # Fallback for Streamlit versions that still expose experimental API.
     st.experimental_rerun()
 
 

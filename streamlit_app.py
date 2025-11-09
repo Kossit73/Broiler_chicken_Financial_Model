@@ -1211,12 +1211,17 @@ def _render_input_section(
             help_text = field.get("help")
 
             default_val = getattr(defaults, attr)
+
+            if min_value is not None:
+                default_val = max(default_val, min_value)
+            if max_value is not None:
+                default_val = min(default_val, max_value)
             input_kwargs: Dict[str, Any] = {}
             if help_text:
                 input_kwargs["help"] = help_text
 
             if dtype == "int":
-                input_kwargs["value"] = int(default_val)
+                input_kwargs["value"] = int(round(default_val))
                 input_kwargs["step"] = int(step) if step is not None else 1
                 if min_value is not None:
                     input_kwargs["min_value"] = int(min_value)

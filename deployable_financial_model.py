@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Iterable
 
 from broiler_model import (
+    AnalyticsPlan,
     Assumptions,
     apply_overrides,
     generate_model_outputs,
@@ -230,6 +231,12 @@ def main() -> None:
         type=Path,
         help="Optional JSON file defining Monte Carlo distributions",
     )
+    parser.add_argument(
+        "--analytics-mode",
+        choices=["full", "summary"],
+        default="full",
+        help="Choose 'summary' to skip heavy analytics (Monte Carlo, goal seek, predictive, custom simulations) for faster runs.",
+    )
     args = parser.parse_args()
 
     if args.assumptions_file:
@@ -244,10 +251,16 @@ def main() -> None:
     output_dir = Path(args.out)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.analytics_mode == "summary":
+        analytics_plan = AnalyticsPlan.summary()
+    else:
+        analytics_plan = AnalyticsPlan.full()
+
     results = generate_model_outputs(
         assumptions,
         custom_simulation_path=args.custom_simulations,
         monte_carlo_config_path=args.monte_carlo_config,
+        analytics_plan=analytics_plan,
     )
     _export_csv(output_dir, args.formats, assumptions, results)
     _export_json(output_dir, args.formats, assumptions, results)

@@ -16,7 +16,7 @@ from broiler_model.production import (
     summarise_revenue_totals,
 )
 from broiler_model.financing import discounted_cash_flow, build_financial_statements
-from broiler_model.analytics import compute_advanced_analytics
+from broiler_model.analytics import AnalyticsPlan, compute_advanced_analytics
 
 
 class GenerateModelOutputsTests(unittest.TestCase):
@@ -81,6 +81,35 @@ class AdvancedAnalyticsTests(unittest.TestCase):
         break_even_rows = analytics.get("break_even", [])
         if break_even_rows:
             self.assertIn("Direct cost", break_even_rows[0])
+
+    def test_summary_plan_skips_heavy_sections(self) -> None:
+        assumptions = Assumptions()
+        cycles = compute_cycles(assumptions)
+        annual = annual_summary(assumptions, cycles)
+        cashflows, loan_schedule = discounted_cash_flow(assumptions, annual)
+        revenue_schedules = build_revenue_schedules(assumptions, cycles)
+        revenue_summary = summarise_revenue_totals(
+            revenue_schedules,
+            assumptions.cycles_per_year,
+            assumptions.production_horizon_years,
+            assumptions.production_start_year,
+        )
+        financials = build_financial_statements(assumptions, cashflows, loan_schedule)
+
+        analytics = compute_advanced_analytics(
+            assumptions,
+            cashflows,
+            financials["income_statement"],
+            financials["balance_sheet"],
+            revenue_summary,
+            revenue_schedules,
+            annual,
+            plan=AnalyticsPlan.summary(),
+        )
+
+        self.assertEqual(analytics["monte_carlo"]["summary"].get("iterations"), 0)
+        self.assertFalse(analytics["custom_simulations"].get("results"))
+        self.assertFalse(analytics["scenario_planning"])
 
 
 class CLIBaselineRegressionTests(unittest.TestCase):

@@ -2,6 +2,7 @@
 
 from .assumptions import Assumptions
 from .model import (
+    AnalyticsPlan,
     apply_overrides,
     generate_model_outputs,
     load_assumptions_from_file,
@@ -12,6 +13,7 @@ from .model import (
 
 __all__ = [
     "Assumptions",
+    "AnalyticsPlan",
     "generate_model_outputs",
     "load_assumptions_from_file",
     "apply_overrides",

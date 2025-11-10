@@ -26,7 +26,7 @@ from .financing import (
     npv,
     irr,
 )
-from .analytics import compute_advanced_analytics
+from .analytics import AnalyticsPlan, compute_advanced_analytics
 from .config import (
     load_custom_simulation_definitions,
     load_monte_carlo_distributions,
@@ -56,6 +56,7 @@ def generate_model_outputs(
     *,
     custom_simulation_path: Optional[Path] = None,
     monte_carlo_config_path: Optional[Path] = None,
+    analytics_plan: Optional[AnalyticsPlan] = None,
 ) -> Dict[str, Any]:
     custom_simulations = load_custom_simulation_definitions(custom_simulation_path)
     monte_carlo_distributions = load_monte_carlo_distributions(monte_carlo_config_path)
@@ -87,6 +88,7 @@ def generate_model_outputs(
         annual,
         custom_simulation_definitions=custom_simulations,
         monte_carlo_distributions=monte_carlo_distributions,
+        plan=analytics_plan,
     )
 
     valuation_cashflows = [row.free_cash_flow for row in cashflows]

@@ -57,6 +57,13 @@ By default the CLI and Streamlit app load the reference configurations stored in
 providing alternates on the command line) lets you persist bespoke analytics
 setups outside the codebase.
 
+When you need faster runs (for example in CI or quick iteration loops) you can
+skip the heaviest analytics modules by adding `--analytics-mode summary`.  The
+summary plan keeps the core metrics, DSCR traces, trend tables, break-even
+analysis, and valuation outputs intact while deferring Monte Carlo, goal seek,
+predictive ML, scenario planning, and custom simulations until you explicitly
+request them.
+
 The command creates the `outputs/` directory (if needed) and writes:
 
 - `assumptions_summary.(csv|json)` – four-schedule table (Production,
@@ -184,6 +191,12 @@ An **AI & Machine Learning Settings** expander appears at the top of the Input
 Landing Page so you can configure optional forecasting and narrative preferences
 before editing assumptions. The settings panel stores values per scenario and
 supports multiple providers, model names, and narrative focus areas.
+
+To keep the interface responsive, the dashboard bootstraps each scenario using a
+summary analytics plan (the same mode exposed via the CLI). Monte Carlo, custom
+simulations, scenario planning, goal seek, and predictive ML blocks only run
+after you press their respective **Run** buttons, ensuring edits propagate
+quickly while still allowing deeper analysis on demand.
 
 ### Configuring editable schedules
 

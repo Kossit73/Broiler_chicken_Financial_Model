@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - optional dependency
@@ -26,6 +26,38 @@ from .financing import (
     irr,
 )
 from .production import AnnualSummary, compute_cycles, annual_summary, _to_float
+
+
+@dataclass(frozen=True)
+class AnalyticsPlan:
+    """Control which advanced analytics blocks are computed."""
+
+    include_what_if: bool = True
+    include_monte_carlo: bool = True
+    include_break_even: bool = True
+    include_goal_seek: bool = True
+    include_predictive: bool = True
+    include_scenario_planning: bool = True
+    include_custom_simulations: bool = True
+
+    @classmethod
+    def full(cls) -> "AnalyticsPlan":
+        """Return a plan that computes every analytics section."""
+
+        return cls()
+
+    @classmethod
+    def summary(cls) -> "AnalyticsPlan":
+        """Return a lightweight plan that skips expensive computations."""
+
+        return cls(
+            include_what_if=False,
+            include_monte_carlo=False,
+            include_goal_seek=False,
+            include_predictive=False,
+            include_scenario_planning=False,
+            include_custom_simulations=False,
+        )
 
 
 def _calculate_payback_period(cashflows: Iterable[CashFlowRow]) -> float:
@@ -779,7 +811,9 @@ def compute_advanced_analytics(
     annual: AnnualSummary,
     custom_simulation_definitions: Optional[List[Dict[str, Any]]] = None,
     monte_carlo_distributions: Optional[List[Dict[str, Any]]] = None,
+    plan: Optional[AnalyticsPlan] = None,
 ) -> Dict[str, Any]:
+    plan = plan or AnalyticsPlan.full()
     if custom_simulation_definitions is None:
         custom_simulation_definitions = load_custom_simulation_definitions()
     if monte_carlo_distributions is None:
@@ -928,6 +962,64 @@ def compute_advanced_analytics(
         if row.year > 0
     ]
 
+    what_if_rows = (
+        perform_what_if_analysis(assumptions, base_metrics)
+        if plan.include_what_if
+        else []
+    )
+    monte_carlo_result = (
+        run_monte_carlo_analysis(
+            assumptions,
+            distributions=monte_carlo_distributions,
+        )
+        if plan.include_monte_carlo
+        else {
+            "summary": {"iterations": 0},
+            "samples": [],
+            "settings": {
+                "iterations": 0,
+                "seed": None,
+                "distributions": monte_carlo_distributions or [],
+            },
+        }
+    )
+    break_even_rows = (
+        break_even_analysis(annual, revenue_summary, revenue_schedules)
+        if plan.include_break_even
+        else []
+    )
+    goal_seek_result = (
+        goal_seek_live_price(assumptions) if plan.include_goal_seek else {}
+    )
+    predictive_payload = (
+        build_predictive_analytics(cashflows, income_statement)
+        if plan.include_predictive
+        else {}
+    )
+    scenario_rows = (
+        scenario_planning(
+            assumptions,
+            base_metrics,
+            annual.revenue,
+        )
+        if plan.include_scenario_planning
+        else []
+    )
+    custom_payload = (
+        run_custom_simulations(
+            assumptions, base_metrics, custom_simulation_definitions
+        )
+        if plan.include_custom_simulations
+        else {
+            "definitions": [],
+            "results": [],
+            "invalid": [],
+            "delta_summary": [],
+        }
+    )
+    if not plan.include_custom_simulations:
+        custom_payload["definitions"] = custom_simulation_definitions or []
+
     return {
         "metrics": metrics,
         "dscr": dscr_rows,
@@ -935,22 +1027,22 @@ def compute_advanced_analytics(
         "returns": returns_rows,
         "coverage": coverage_rows,
         "leverage": leverage_rows,
-        "what_if": perform_what_if_analysis(assumptions, base_metrics),
-        "monte_carlo": run_monte_carlo_analysis(
-            assumptions,
-            distributions=monte_carlo_distributions,
-        ),
-        "break_even": break_even_analysis(annual, revenue_summary, revenue_schedules),
-        "goal_seek": goal_seek_live_price(assumptions),
-        "predictive": build_predictive_analytics(cashflows, income_statement),
-        "scenario_planning": scenario_planning(
-            assumptions,
-            base_metrics,
-            annual.revenue,
-        ),
-        "custom_simulations": run_custom_simulations(
-            assumptions, base_metrics, custom_simulation_definitions
-        ),
+        "what_if": what_if_rows,
+        "monte_carlo": monte_carlo_result,
+        "break_even": break_even_rows,
+        "goal_seek": goal_seek_result,
+        "predictive": predictive_payload,
+        "scenario_planning": scenario_rows,
+        "custom_simulations": custom_payload,
         "custom_simulation_definitions": custom_simulation_definitions,
         "base_metrics": base_metrics,
+        "plan": {
+            "include_what_if": plan.include_what_if,
+            "include_monte_carlo": plan.include_monte_carlo,
+            "include_break_even": plan.include_break_even,
+            "include_goal_seek": plan.include_goal_seek,
+            "include_predictive": plan.include_predictive,
+            "include_scenario_planning": plan.include_scenario_planning,
+            "include_custom_simulations": plan.include_custom_simulations,
+        },
     }

@@ -17,6 +17,7 @@ from streamlit.delta_generator import DeltaGenerator
 
 from broiler_model.assumptions import Assumptions, ASSUMPTION_SCHEDULE_LAYOUT
 from broiler_model.analytics import (
+    AnalyticsPlan,
     break_even_analysis,
     build_predictive_analytics,
     goal_seek_live_price,
@@ -696,7 +697,10 @@ def _ensure_scenario_payload(
     assumptions_data = snapshot.get("assumptions", {})
     assumptions = Assumptions(**assumptions_data) if assumptions_data else Assumptions()
     model = ScenarioModel(scenario=selected_scenario, assumptions=assumptions)
-    results = generate_model_outputs(assumptions)
+    results = generate_model_outputs(
+        assumptions,
+        analytics_plan=AnalyticsPlan.summary(),
+    )
     cache[selected_scenario] = {
         "snapshot": copy.deepcopy(snapshot),
         "model": model,
@@ -2156,7 +2160,10 @@ def main() -> None:
                 updated_model = ScenarioModel(
                     scenario=selected_scenario, assumptions=new_assumptions
                 )
-                updated_results = generate_model_outputs(new_assumptions)
+                updated_results = generate_model_outputs(
+                    new_assumptions,
+                    analytics_plan=AnalyticsPlan.summary(),
+                )
 
                 scenario_payloads = st.session_state.setdefault(
                     "scenario_payloads", {}

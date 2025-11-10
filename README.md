@@ -64,6 +64,24 @@ analysis, and valuation outputs intact while deferring Monte Carlo, goal seek,
 predictive ML, scenario planning, and custom simulations until you explicitly
 request them.
 
+### Troubleshooting slow dashboard refreshes
+
+The Streamlit app automatically evaluates the model whenever you change
+assumptions or edit a schedule.  A full pass recomputes production cycles,
+annual rollups, cash flows, financial statements, and (optionally) the advanced
+analytics stack, so complex simulations can make edits feel sluggish.  If the UI
+lags:
+
+- Leave the app in the default *summary* analytics mode while iterating.  Heavy
+  modules (Monte Carlo, goal seek, predictive ML, scenario planning, and custom
+  simulations) stay disabled until you press their dedicated **Run** buttons.
+- Reduce the Monte Carlo iteration count when exploring the stochastic results.
+  Each iteration rebuilds the full model, so trimming runs from hundreds to a
+  few dozen dramatically improves turnaround time.
+- Batch multiple edits before triggering a refresh.  The model cache stores the
+  latest scenario snapshot, so applying several tweaks at once avoids a full
+  recompute after every single change.
+
 The command creates the `outputs/` directory (if needed) and writes:
 
 - `assumptions_summary.(csv|json)` – four-schedule table (Production,

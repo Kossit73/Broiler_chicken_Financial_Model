@@ -58,8 +58,17 @@ def generate_model_outputs(
     monte_carlo_config_path: Optional[Path] = None,
     analytics_plan: Optional[AnalyticsPlan] = None,
 ) -> Dict[str, Any]:
-    custom_simulations = load_custom_simulation_definitions(custom_simulation_path)
-    monte_carlo_distributions = load_monte_carlo_distributions(monte_carlo_config_path)
+    plan = analytics_plan or AnalyticsPlan.full()
+    custom_simulations = (
+        load_custom_simulation_definitions(custom_simulation_path)
+        if plan.include_custom_simulations or custom_simulation_path
+        else []
+    )
+    monte_carlo_distributions = (
+        load_monte_carlo_distributions(monte_carlo_config_path)
+        if plan.include_monte_carlo or monte_carlo_config_path
+        else []
+    )
     assumption_schedule = build_assumptions_schedule(assumptions)
     cycles = compute_cycles(assumptions)
     annual = annual_summary(assumptions, cycles)
@@ -88,7 +97,7 @@ def generate_model_outputs(
         annual,
         custom_simulation_definitions=custom_simulations,
         monte_carlo_distributions=monte_carlo_distributions,
-        plan=analytics_plan,
+        plan=plan,
     )
 
     valuation_cashflows = [row.free_cash_flow for row in cashflows]

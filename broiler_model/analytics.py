@@ -815,9 +815,17 @@ def compute_advanced_analytics(
 ) -> Dict[str, Any]:
     plan = plan or AnalyticsPlan.full()
     if custom_simulation_definitions is None:
-        custom_simulation_definitions = load_custom_simulation_definitions()
+        custom_simulation_definitions = (
+            load_custom_simulation_definitions()
+            if plan.include_custom_simulations
+            else []
+        )
     if monte_carlo_distributions is None:
-        monte_carlo_distributions = load_monte_carlo_distributions()
+        monte_carlo_distributions = (
+            load_monte_carlo_distributions()
+            if plan.include_monte_carlo
+            else []
+        )
 
     metrics: List[Dict[str, Any]] = []
 

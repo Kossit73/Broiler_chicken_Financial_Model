@@ -1607,6 +1607,8 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
 
     values: Dict[str, Any] = {}
 
+    timeline_placeholder = st.container()
+
     _render_input_section(
         "Production",
         [
@@ -1653,15 +1655,6 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         values,
         columns=4,
     )
-
-    start_year = int(values.get("production_start_year", defaults.production_start_year))
-    horizon_years = int(values.get("production_horizon_years", defaults.production_horizon_years))
-    if horizon_years <= 0:
-        horizon_years = 1
-    end_year = start_year + horizon_years - 1
-    timeline_cols = st.columns(2)
-    timeline_cols[0].metric("Production start year", start_year)
-    timeline_cols[1].metric("Production end year", end_year)
 
     _render_input_section(
         "Pricing",
@@ -1905,7 +1898,7 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         columns=4,
     )
 
-    return Assumptions(
+    assumptions = Assumptions(
         farm_name=farm_name,
         cycles_per_year=int(values["cycles_per_year"]),
         production_start_year=int(values["production_start_year"]),
@@ -1944,6 +1937,18 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         depreciation_years=int(values["depreciation_years"]),
         maintenance_capex_annual=float(values["maintenance_capex_annual"]),
     )
+
+    with timeline_placeholder:
+        start_year = int(assumptions.production_start_year)
+        horizon_years = int(assumptions.production_horizon_years)
+        if horizon_years <= 0:
+            horizon_years = 1
+        end_year = start_year + horizon_years - 1
+        timeline_cols = st.columns(2)
+        timeline_cols[0].metric("Production start year", start_year)
+        timeline_cols[1].metric("Production end year", end_year)
+
+    return assumptions
 def main() -> None:
     st.set_page_config(page_title="Broiler Chicken Financial Model", layout="wide")
     st.title("Broiler Chicken Financial Model")

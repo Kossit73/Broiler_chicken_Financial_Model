@@ -326,6 +326,159 @@ def _combined_leverage_chart(
     )
 
 
+def _format_currency(value: Any) -> str:
+    """Return a compact currency representation for numeric values."""
+
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "N/A"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"${numeric:,.0f}"
+
+
+def _format_ratio(value: Any, digits: int = 2) -> str:
+    """Return a fixed precision ratio string for display."""
+
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "N/A"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"{numeric:.{digits}f}x"
+
+
+def _build_income_composition_chart(income_df: pd.DataFrame) -> Optional[alt.Chart]:
+    """Render a grouped bar chart for revenue, EBITDA, and net income by year."""
+
+    if income_df.empty or "year" not in income_df.columns:
+        return None
+
+    records: List[Dict[str, Any]] = []
+    for _, row in income_df.iterrows():
+        year = row.get("year")
+        for column, label in (
+            ("revenue", "Revenue"),
+            ("ebitda", "EBITDA"),
+            ("net_income", "Net income"),
+        ):
+            value = row.get(column)
+            if year is None or pd.isna(year) or value is None or pd.isna(value):
+                continue
+            records.append(
+                {
+                    "Year": int(float(year)),
+                    "Metric": label,
+                    "Value": float(value),
+                }
+            )
+
+    if not records:
+        return None
+
+    chart_df = pd.DataFrame(records)
+    return (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("Year:O", title="Year"),
+            y=alt.Y("Value:Q", title="USD"),
+            color=alt.Color("Metric:N", title="Metric"),
+            xOffset="Metric:N",
+            tooltip=[
+                alt.Tooltip("Year:O"),
+                alt.Tooltip("Metric:N"),
+                alt.Tooltip("Value:Q", format=",.0f"),
+            ],
+        )
+    )
+
+
+def _build_business_plan_markdown(
+    scenario: str,
+    assumptions: Assumptions,
+    valuation: Dict[str, Any],
+    annual_df: pd.DataFrame,
+    dscr_df: pd.DataFrame,
+    break_even_df: pd.DataFrame,
+    monte_carlo_summary_df: pd.DataFrame,
+) -> str:
+    """Build comprehensive business plan narrative text from current model outputs."""
+
+    annual_row = annual_df.iloc[0].to_dict() if not annual_df.empty else {}
+    start_year = int(getattr(assumptions, "production_start_year", 0) or 0)
+    horizon = int(getattr(assumptions, "production_horizon_years", 0) or 0)
+    end_year = start_year + max(horizon - 1, 0)
+
+    avg_dscr = dscr_df["dscr"].mean() if not dscr_df.empty and "dscr" in dscr_df.columns else None
+    avg_break_even_price = (
+        break_even_df["break_even_price_per_kg"].mean()
+        if not break_even_df.empty and "break_even_price_per_kg" in break_even_df.columns
+        else None
+    )
+
+    npv = valuation.get("npv")
+    irr = valuation.get("irr")
+    irr_text = f"{float(irr):.2%}" if isinstance(irr, (int, float)) else "N/A"
+    payback = valuation.get("payback_period_years")
+    annual_revenue = annual_row.get("revenue")
+    annual_ebitda = annual_row.get("ebitda")
+    annual_net_income = annual_row.get("net_income")
+
+    monte_carlo_p5 = None
+    monte_carlo_p50 = None
+    monte_carlo_p95 = None
+    if not monte_carlo_summary_df.empty:
+        row = monte_carlo_summary_df.iloc[0]
+        monte_carlo_p5 = row.get("npv_p5")
+        monte_carlo_p50 = row.get("npv_p50")
+        monte_carlo_p95 = row.get("npv_p95")
+
+    return f"""
+### 1) Executive Summary
+The **{scenario}** strategy for the broiler project is designed for a planning horizon from **{start_year} to {end_year}**.  
+The model estimates a project NPV of **{_format_currency(npv)}** and an IRR of **{irr_text}**, indicating expected value creation under current assumptions.
+
+### 2) Production & Operating Plan
+- Cycles per year: **{assumptions.cycles_per_year}**
+- Birds per cycle: **{assumptions.birds_per_cycle:,}**
+- Mortality rate: **{assumptions.mortality_rate:.2%}**
+- Feed conversion ratio: **{assumptions.feed_conversion_ratio:.2f}**
+
+Operational execution should prioritize biosecurity discipline, feed-efficiency optimization, and labor/energy productivity to stabilize margin delivery.
+
+### 3) Financial Performance Plan
+- Annual revenue (current run): **{_format_currency(annual_revenue)}**
+- Annual EBITDA (current run): **{_format_currency(annual_ebitda)}**
+- Annual net income (current run): **{_format_currency(annual_net_income)}**
+- Average DSCR: **{_format_ratio(avg_dscr)}**
+- Payback period: **{payback if payback is not None else 'N/A'} years**
+
+The finance plan should maintain covenant headroom with DSCR buffers and a liquidity reserve calibrated to debt-service and working-capital variability.
+
+### 4) Market, Pricing, and Break-even Strategy
+- Base live price per kg: **{_format_currency(assumptions.live_price_per_kg)}**
+- Price growth assumption: **{assumptions.price_growth:.2%}**
+- Average break-even price per kg: **{_format_currency(avg_break_even_price)}**
+
+Commercial strategy should blend contracted offtake and spot exposure to protect downside while preserving upside during favorable price cycles.
+
+### 5) Risk Assessment & Mitigation
+- Monte Carlo NPV P5: **{_format_currency(monte_carlo_p5)}**
+- Monte Carlo NPV P50: **{_format_currency(monte_carlo_p50)}**
+- Monte Carlo NPV P95: **{_format_currency(monte_carlo_p95)}**
+
+Risk controls should include feed-procurement hedging, contingency mortality protocols, and refinancing reviews to reduce free-cash-flow volatility.
+
+### 6) Implementation Roadmap
+1. **Year {start_year}:** commissioning, supplier onboarding, and operating rhythm stabilization.  
+2. **Years {start_year + 1}-{end_year}:** throughput optimization, cost benchmarking, and selective capacity/process upgrades.  
+3. **Annual cadence:** quarterly KPI reviews (margin, DSCR, mortality, FCR), scenario stress tests, and pricing strategy updates.
+""".strip()
+
+
 def _tornado_chart(
     what_if_df: pd.DataFrame, scenario_df: pd.DataFrame
 ) -> Optional[alt.Chart]:
@@ -2288,6 +2441,63 @@ def main() -> None:
         st.header("AI & Machine Learning Settings")
         st.caption("Configure model provider, forecast methods, and generative insights options.")
         _render_ai_settings(payload)
+        st.divider()
+        st.subheader("Business Plan Agent")
+        st.caption(
+            "Generate a comprehensive, investor-ready business plan with automated analysis "
+            "and visual exhibits derived from the live model outputs."
+        )
+        generate_plan = st.button(
+            "Generate full business plan",
+            key=f"generate_business_plan_{selected_scenario}",
+            type="primary",
+        )
+        plan_state_key = f"business_plan_ready_{selected_scenario}"
+        if generate_plan:
+            st.session_state[plan_state_key] = True
+
+        if st.session_state.get(plan_state_key, False):
+            plan_markdown = _build_business_plan_markdown(
+                selected_scenario,
+                assumptions,
+                valuation,
+                annual_df,
+                dscr_df,
+                break_even_df,
+                monte_carlo_summary_df,
+            )
+            st.markdown(plan_markdown)
+
+            summary_by_category = pd.DataFrame(revenue_summary.get("by_category", []))
+            revenue_chart = _build_revenue_stack_chart(summary_by_category)
+            if revenue_chart is not None:
+                st.markdown("#### Revenue mix and growth outlook")
+                st.altair_chart(revenue_chart, use_container_width=True)
+
+            income_mix_chart = _build_income_composition_chart(income_df)
+            if income_mix_chart is not None:
+                st.markdown("#### Profitability profile")
+                st.altair_chart(income_mix_chart, use_container_width=True)
+
+            leverage_chart = _combined_leverage_chart(dscr_df, coverage_df, leverage_df)
+            if leverage_chart is not None:
+                st.markdown("#### Leverage and debt-service resilience")
+                st.altair_chart(leverage_chart, use_container_width=True)
+
+            if not monte_carlo_samples_df.empty and {"iteration", "npv"}.issubset(
+                monte_carlo_samples_df.columns
+            ):
+                mc_chart = (
+                    alt.Chart(monte_carlo_samples_df)
+                    .mark_bar(opacity=0.8)
+                    .encode(
+                        x=alt.X("npv:Q", bin=alt.Bin(maxbins=40), title="NPV (USD)"),
+                        y=alt.Y("count():Q", title="Frequency"),
+                        tooltip=[alt.Tooltip("count():Q", title="Samples")],
+                    )
+                )
+                st.markdown("#### NPV risk distribution")
+                st.altair_chart(mc_chart, use_container_width=True)
 
     analytics_namespace = "advanced_schedule_state"
 
@@ -2900,4 +3110,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

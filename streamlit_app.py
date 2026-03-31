@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timezone
+import hashlib
 from io import BytesIO
 import json
 import math
@@ -577,6 +579,128 @@ def _generate_investor_recommendations(
     return recommendations
 
 
+def _confidence_band(label: str, value: float) -> str:
+    """Return confidence level for selected assumptions."""
+
+    if label == "Mortality rate":
+        return "High" if value <= 0.05 else "Medium" if value <= 0.08 else "Low"
+    if label == "Feed conversion ratio":
+        return "High" if value <= 1.65 else "Medium" if value <= 1.85 else "Low"
+    if label == "Feed cost per kg":
+        return "High" if value <= 0.50 else "Medium" if value <= 0.65 else "Low"
+    if label == "Live price per kg":
+        return "High" if value >= 1.8 else "Medium" if value >= 1.5 else "Low"
+    return "Medium"
+
+
+def _build_assumption_confidence_frame(assumptions: Assumptions) -> pd.DataFrame:
+    """Create confidence ratings for key investment assumptions."""
+
+    items = [
+        ("Live price per kg", float(assumptions.live_price_per_kg)),
+        ("Feed conversion ratio", float(assumptions.feed_conversion_ratio)),
+        ("Mortality rate", float(assumptions.mortality_rate)),
+        ("Feed cost per kg", float(assumptions.feed_cost_per_kg)),
+    ]
+    rows: List[Dict[str, Any]] = []
+    for label, value in items:
+        rows.append(
+            {
+                "Assumption": label,
+                "Value": value,
+                "Confidence": _confidence_band(label, value),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_investor_scorecard(
+    valuation: Dict[str, Any],
+    dscr_df: pd.DataFrame,
+    break_even_df: pd.DataFrame,
+    assumptions: Assumptions,
+    benchmarks: Dict[str, float],
+) -> pd.DataFrame:
+    """Build traffic-light scorecard for investors."""
+
+    irr = valuation.get("irr")
+    payback = valuation.get("payback_period_years")
+    npv = valuation.get("npv")
+    avg_dscr = (
+        float(dscr_df["dscr"].mean())
+        if not dscr_df.empty and "dscr" in dscr_df.columns
+        else None
+    )
+    break_even_price = (
+        float(break_even_df["break_even_price_per_kg"].mean())
+        if not break_even_df.empty and "break_even_price_per_kg" in break_even_df.columns
+        else None
+    )
+    price_buffer = (
+        float(assumptions.live_price_per_kg) - break_even_price
+        if break_even_price is not None
+        else None
+    )
+
+    irr_threshold = float(benchmarks.get("target_irr", 0.18))
+    dscr_threshold = float(benchmarks.get("min_dscr", 1.5))
+    payback_threshold = float(benchmarks.get("max_payback_years", 6.0))
+
+    metrics = [
+        ("NPV", npv, "positive"),
+        ("IRR", irr, "high"),
+        ("Average DSCR", avg_dscr, "high"),
+        ("Payback (years)", payback, "low"),
+        ("Price buffer vs break-even", price_buffer, "positive"),
+    ]
+    rows: List[Dict[str, Any]] = []
+    for metric, value, direction in metrics:
+        status = "🟡 Watch"
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            status = "⚪ N/A"
+        elif direction == "positive":
+            status = "🟢 Strong" if float(value) > 0 else "🔴 Weak"
+        elif direction == "high":
+            threshold = irr_threshold if metric == "IRR" else dscr_threshold
+            status = "🟢 Strong" if float(value) >= threshold else "🔴 Weak"
+        elif direction == "low":
+            status = "🟢 Strong" if float(value) <= payback_threshold else "🔴 Weak"
+
+        rows.append({"Metric": metric, "Value": value, "Status": status})
+
+    return pd.DataFrame(rows)
+
+
+def _build_ic_pack_markdown(
+    scenario: str,
+    scorecard_df: pd.DataFrame,
+    plan_markdown: str,
+    recommendations: List[str],
+) -> str:
+    """Create an investment-committee text pack for download."""
+
+    score_lines = []
+    for _, row in scorecard_df.iterrows():
+        score_lines.append(
+            f"- {row.get('Metric')}: {row.get('Status')} ({row.get('Value')})"
+        )
+    recommendation_lines = [f"- {item}" for item in recommendations]
+    return "\n".join(
+        [
+            f"# Investment Committee Pack - {scenario}",
+            "",
+            "## Investor Scorecard",
+            *score_lines,
+            "",
+            "## Comprehensive Plan",
+            plan_markdown,
+            "",
+            "## Recommended Actions",
+            *recommendation_lines,
+        ]
+    )
+
+
 def _tornado_chart(
     what_if_df: pd.DataFrame, scenario_df: pd.DataFrame
 ) -> Optional[alt.Chart]:
@@ -1091,9 +1215,16 @@ DEFAULT_AI_SETTINGS: Dict[str, Any] = {
     "provider": "OpenAI",
     "model": "gpt-4o-mini",
     "forecast_horizon": 3,
+    "auto_run_predictive": False,
     "ml_methods": ["linear_regression"],
     "generative_features": ["summary"],
     "api_key": "",
+}
+
+DEFAULT_INVESTOR_BENCHMARKS: Dict[str, float] = {
+    "target_irr": 0.18,
+    "min_dscr": 1.5,
+    "max_payback_years": 6.0,
 }
 
 
@@ -1796,6 +1927,11 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
             step=1,
             help="Number of additional years used for machine-learning revenue forecasts.",
         )
+        auto_run_predictive = form.checkbox(
+            "Auto-run predictive analytics",
+            value=bool(settings.get("auto_run_predictive", False)),
+            help="Automatically refresh predictive analytics when inputs are updated.",
+        )
 
         ml_selection = form.multiselect(
             "Machine Learning Methods",
@@ -1833,6 +1969,7 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
                 "provider": provider,
                 "model": model.strip() or "gpt-4",
                 "forecast_horizon": int(horizon),
+                "auto_run_predictive": auto_run_predictive,
                 "ml_methods": ml_codes or ["linear_regression"],
                 "generative_features": feature_codes or ["summary"],
                 "api_key": api_key.strip(),
@@ -2210,8 +2347,10 @@ def main() -> None:
         scenario_store[selected_scenario] = {
             "assumptions": asdict(Assumptions()),
             "ai_settings": DEFAULT_AI_SETTINGS.copy(),
+            "investor_benchmarks": DEFAULT_INVESTOR_BENCHMARKS.copy(),
         }
     payload = scenario_store[selected_scenario]
+    payload.setdefault("investor_benchmarks", DEFAULT_INVESTOR_BENCHMARKS.copy())
 
     defaults = Assumptions(**payload.get("assumptions", {}))
 
@@ -2234,7 +2373,18 @@ def main() -> None:
     with input_tab:
         assumptions = assumptions_form(defaults)
 
+    previous_assumptions = copy.deepcopy(payload.get("assumptions", {}))
     payload["assumptions"] = asdict(assumptions)
+    if previous_assumptions != payload["assumptions"]:
+        governance_store = st.session_state.setdefault("governance_log", {})
+        scenario_log = governance_store.setdefault(selected_scenario, [])
+        scenario_log.append(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": "Assumptions updated",
+            }
+        )
+        st.session_state.governance_log = governance_store
 
     ai_settings = _payload_to_ai_settings(payload)
     payload["ai_settings"] = ai_settings
@@ -2405,10 +2555,21 @@ def main() -> None:
                 updated_assumptions, model.assumptions
             )
             if new_assumptions is not None:
+                prior_assumptions = copy.deepcopy(payload.get("assumptions", {}))
                 payload["assumptions"] = asdict(new_assumptions)
                 scenario_store[selected_scenario]["assumptions"] = asdict(
                     new_assumptions
                 )
+                if prior_assumptions != payload["assumptions"]:
+                    governance_store = st.session_state.setdefault("governance_log", {})
+                    scenario_log = governance_store.setdefault(selected_scenario, [])
+                    scenario_log.append(
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "event": "Assumption schedule edits applied",
+                        }
+                    )
+                    st.session_state.governance_log = governance_store
                 st.session_state.snapshot_scenario = selected_scenario
                 st.session_state.input_snapshot = copy.deepcopy(payload)
 
@@ -2539,6 +2700,83 @@ def main() -> None:
         st.header("AI & Machine Learning Settings")
         st.caption("Configure model provider, forecast methods, and generative insights options.")
         _render_ai_settings(payload)
+        st.markdown("### Investor benchmark hurdles")
+        benchmark_defaults = payload.get(
+            "investor_benchmarks", DEFAULT_INVESTOR_BENCHMARKS.copy()
+        )
+        bcol1, bcol2, bcol3 = st.columns(3)
+        target_irr = bcol1.number_input(
+            "Target IRR",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(benchmark_defaults.get("target_irr", 0.18)),
+            step=0.01,
+            format="%.2f",
+        )
+        min_dscr = bcol2.number_input(
+            "Minimum DSCR",
+            min_value=0.5,
+            max_value=5.0,
+            value=float(benchmark_defaults.get("min_dscr", 1.5)),
+            step=0.1,
+            format="%.2f",
+        )
+        max_payback = bcol3.number_input(
+            "Max payback (years)",
+            min_value=1.0,
+            max_value=20.0,
+            value=float(benchmark_defaults.get("max_payback_years", 6.0)),
+            step=0.5,
+            format="%.1f",
+        )
+        payload["investor_benchmarks"] = {
+            "target_irr": float(target_irr),
+            "min_dscr": float(min_dscr),
+            "max_payback_years": float(max_payback),
+        }
+        st.session_state["scenario_store"][selected_scenario] = payload
+
+        scorecard_df = _build_investor_scorecard(
+            valuation,
+            dscr_df,
+            break_even_df,
+            assumptions,
+            payload["investor_benchmarks"],
+        )
+        benchmark_map = {
+            "IRR": target_irr,
+            "Average DSCR": min_dscr,
+            "Payback (years)": max_payback,
+        }
+        if not scorecard_df.empty:
+            scorecard_df = scorecard_df.copy()
+            scorecard_df["Benchmark"] = scorecard_df["Metric"].map(benchmark_map)
+            scorecard_df["Benchmark"] = scorecard_df["Benchmark"].fillna("N/A")
+            st.markdown("### Investor scorecard")
+            st.dataframe(scorecard_df, use_container_width=True, hide_index=True)
+
+        st.markdown("### Assumption confidence bands")
+        confidence_df = _build_assumption_confidence_frame(assumptions)
+        st.dataframe(confidence_df, use_container_width=True, hide_index=True)
+
+        st.markdown("### Model governance")
+        assumptions_hash = hashlib.sha256(
+            json.dumps(payload.get("assumptions", {}), sort_keys=True).encode("utf-8")
+        ).hexdigest()[:12]
+        governance_log = st.session_state.get("governance_log", {}).get(
+            selected_scenario, []
+        )
+        st.write(f"**Model version:** v1.0")
+        st.write(f"**Scenario:** {selected_scenario}")
+        st.write(f"**Assumptions hash:** `{assumptions_hash}`")
+        st.write(
+            f"**Last reviewed (UTC):** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        if governance_log:
+            st.markdown("**Recent changes:**")
+            for entry in governance_log[-5:]:
+                st.markdown(f"- {entry.get('timestamp')}: {entry.get('event')}")
+
         st.divider()
         st.subheader("Business Plan Agent")
         st.caption(
@@ -2575,6 +2813,20 @@ def main() -> None:
             )
             for recommendation in investor_recommendations:
                 st.markdown(f"- {recommendation}")
+
+            ic_pack_text = _build_ic_pack_markdown(
+                selected_scenario,
+                scorecard_df,
+                plan_markdown,
+                investor_recommendations,
+            )
+            st.download_button(
+                "Download IC Pack (Markdown)",
+                data=ic_pack_text.encode("utf-8"),
+                file_name=f"IC_Pack_{selected_scenario.replace(' ', '_')}.md",
+                mime="text/markdown",
+                key=f"download_ic_pack_{selected_scenario}",
+            )
 
             summary_by_category = pd.DataFrame(revenue_summary.get("by_category", []))
             revenue_chart = _build_revenue_stack_chart(summary_by_category)
@@ -3080,11 +3332,15 @@ def main() -> None:
                 pass
 
         st.subheader("Predictive analytics")
-        run_predictive = st.button(
+        auto_run_predictive = bool(ai_settings.get("auto_run_predictive", False))
+        run_predictive_clicked = st.button(
             "Run predictive analytics",
             key=f"run_predictive_{selected_scenario}",
             help="Refresh automated forecasts, time-series projections, and risk checks.",
         )
+        if auto_run_predictive:
+            st.caption("Auto-run predictive analytics is enabled for this scenario.")
+        run_predictive = run_predictive_clicked or auto_run_predictive
         if run_predictive:
             with st.spinner("Recomputing predictive analytics..."):
                 predictive = build_predictive_analytics(

@@ -1594,13 +1594,10 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
         _rerun()
 
 
-def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumptions:
+def assumptions_form(defaults: Assumptions) -> Assumptions:
     st.header("Model assumptions")
 
     farm_name = st.text_input("Farm name", defaults.farm_name)
-
-    ai_container = st.expander("AI & Machine Learning Settings", expanded=False)
-    _render_ai_settings(payload, ai_container)
 
     st.subheader("Input Landing Page")
     st.caption("Adjust the production, pricing, cost, and capital structure assumptions below.")
@@ -1972,17 +1969,19 @@ def main() -> None:
         production_tab,
         financials_tab,
         analytics_tab,
+        ai_ml_tab,
     ) = st.tabs(
         [
             "Input Landing Page",
             "Production & revenues",
             "Financial statements",
             "Advanced analytics",
+            "AI & machine learning settings",
         ]
     )
 
     with input_tab:
-        assumptions = assumptions_form(defaults, payload)
+        assumptions = assumptions_form(defaults)
 
     payload["assumptions"] = asdict(assumptions)
 
@@ -2283,6 +2282,12 @@ def main() -> None:
             st.dataframe(cash_statement_df, use_container_width=True, hide_index=True)
         with fin_tab4:
             st.dataframe(loan_df, use_container_width=True, hide_index=True)
+
+
+    with ai_ml_tab:
+        st.header("AI & Machine Learning Settings")
+        st.caption("Configure model provider, forecast methods, and generative insights options.")
+        _render_ai_settings(payload)
 
     analytics_namespace = "advanced_schedule_state"
 

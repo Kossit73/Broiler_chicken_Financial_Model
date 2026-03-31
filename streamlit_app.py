@@ -479,6 +479,104 @@ Risk controls should include feed-procurement hedging, contingency mortality pro
 """.strip()
 
 
+def _generate_investor_recommendations(
+    assumptions: Assumptions,
+    valuation: Dict[str, Any],
+    annual_df: pd.DataFrame,
+    dscr_df: pd.DataFrame,
+    break_even_df: pd.DataFrame,
+) -> List[str]:
+    """Generate practical recommendations that improve investor appeal."""
+
+    recommendations: List[str] = []
+    npv = valuation.get("npv")
+    irr = valuation.get("irr")
+    payback = valuation.get("payback_period_years")
+
+    avg_dscr = (
+        float(dscr_df["dscr"].mean())
+        if not dscr_df.empty and "dscr" in dscr_df.columns
+        else None
+    )
+    avg_break_even_price = (
+        float(break_even_df["break_even_price_per_kg"].mean())
+        if not break_even_df.empty and "break_even_price_per_kg" in break_even_df.columns
+        else None
+    )
+
+    annual_revenue = None
+    if not annual_df.empty and "revenue" in annual_df.columns:
+        revenue = annual_df.iloc[0].get("revenue")
+        annual_revenue = float(revenue) if pd.notna(revenue) else None
+
+    if isinstance(npv, (int, float)) and npv > 0:
+        recommendations.append(
+            f"Lead with the positive NPV case (**{_format_currency(npv)}**) and show a "
+            "base/downside/upside sensitivity table in investor materials."
+        )
+    else:
+        recommendations.append(
+            "Rework the investment thesis by improving price/cost assumptions and "
+            "showing a credible path to positive NPV before investor outreach."
+        )
+
+    if isinstance(irr, (int, float)):
+        if irr >= 0.18:
+            recommendations.append(
+                f"Position IRR (**{irr:.2%}**) as a strong return profile versus agri-sector "
+                "benchmarks while documenting key assumptions transparently."
+            )
+        else:
+            recommendations.append(
+                f"IRR (**{irr:.2%}**) is modest; improve attractiveness by combining operating "
+                "efficiency initiatives with financing optimization."
+            )
+
+    if avg_dscr is not None:
+        if avg_dscr >= 1.5:
+            recommendations.append(
+                f"Highlight debt-service resilience (average DSCR **{avg_dscr:.2f}x**) and "
+                "include covenant headroom charts to reassure lenders and equity partners."
+            )
+        else:
+            recommendations.append(
+                f"Strengthen bankability by improving DSCR (currently **{avg_dscr:.2f}x**) "
+                "through lower leverage or staged capex."
+            )
+
+    if avg_break_even_price is not None:
+        price_gap = assumptions.live_price_per_kg - avg_break_even_price
+        if price_gap > 0:
+            recommendations.append(
+                f"Show pricing buffer: current live price exceeds break-even by "
+                f"**{_format_currency(price_gap)} per kg**, reinforcing downside protection."
+            )
+        else:
+            recommendations.append(
+                "Current live price is at/below break-even; prioritize cost-out actions and "
+                "offtake contract repricing before a fundraise."
+            )
+
+    if isinstance(payback, (int, float)):
+        recommendations.append(
+            f"Present a milestone-based capital recovery timeline with a modeled payback of "
+            f"**{payback:.1f} years** and quarterly KPI checkpoints."
+        )
+
+    if annual_revenue is not None:
+        recommendations.append(
+            f"Package the model with a one-page investment memo anchored on expected annual "
+            f"revenue (**{_format_currency(annual_revenue)}**), unit economics, and risk controls."
+        )
+
+    recommendations.append(
+        "Increase investor trust by publishing a model governance pack: assumptions log, "
+        "version history, and scenario-testing methodology."
+    )
+
+    return recommendations
+
+
 def _tornado_chart(
     what_if_df: pd.DataFrame, scenario_df: pd.DataFrame
 ) -> Optional[alt.Chart]:
@@ -2467,6 +2565,16 @@ def main() -> None:
                 monte_carlo_summary_df,
             )
             st.markdown(plan_markdown)
+            st.markdown("### Investor attractiveness recommendations")
+            investor_recommendations = _generate_investor_recommendations(
+                assumptions,
+                valuation,
+                annual_df,
+                dscr_df,
+                break_even_df,
+            )
+            for recommendation in investor_recommendations:
+                st.markdown(f"- {recommendation}")
 
             summary_by_category = pd.DataFrame(revenue_summary.get("by_category", []))
             revenue_chart = _build_revenue_stack_chart(summary_by_category)

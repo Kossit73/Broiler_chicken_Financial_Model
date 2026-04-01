@@ -181,6 +181,7 @@ def build_revenue_schedules(
 
     schedules: Dict[str, List[Dict[str, Any]]] = {}
     cycle_list = list(cycles)
+    cycle_by_number = {cycle.cycle: cycle for cycle in cycle_list}
 
     unit_price = assumptions.final_weight_kg * assumptions.live_price_per_kg
     unit_lookup = {
@@ -219,24 +220,23 @@ def build_revenue_schedules(
         "Live Birds Revenue": 1.0,  # heads per surviving bird
         "By-Product (feathers, offal, livers) Revenue": 0.08,  # by-product kg per kg live weight
     }
+    fallback_survivors = round(
+        assumptions.birds_per_cycle * (1 - assumptions.mortality_rate)
+    )
+    fallback_live_weight_kg = fallback_survivors * assumptions.final_weight_kg
 
     for category in REVENUE_CATEGORIES[1:]:
         template_rows = []
+        yield_value = default_yield_map.get(category, 0.0)
+        unit_price_value = _to_float(price_lookup.get(category))
         for period in range(1, template_periods + 1):
-            cycle = next((c for c in cycle_list if c.cycle == period), None)
-            survivors = cycle.survivors if cycle else round(
-                assumptions.birds_per_cycle * (1 - assumptions.mortality_rate)
-            )
-            live_weight_kg = (
-                cycle.live_weight_kg
-                if cycle
-                else survivors * assumptions.final_weight_kg
-            )
+            cycle = cycle_by_number.get(period)
+            survivors = cycle.survivors if cycle else fallback_survivors
+            live_weight_kg = cycle.live_weight_kg if cycle else fallback_live_weight_kg
             if category == "By-Product (feathers, offal, livers) Revenue":
-                units = live_weight_kg * default_yield_map[category]
+                units = live_weight_kg * yield_value
             else:
-                units = survivors * default_yield_map.get(category, 0.0)
-            unit_price_value = _to_float(price_lookup.get(category))
+                units = survivors * yield_value
             revenue = (
                 units * unit_price_value if unit_price_value is not None else None
             )

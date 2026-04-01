@@ -180,6 +180,7 @@ def build_revenue_schedules(
     """Return revenue schedules for each poultry revenue category."""
 
     schedules: Dict[str, List[Dict[str, Any]]] = {}
+    cycle_list = list(cycles)
 
     unit_price = assumptions.final_weight_kg * assumptions.live_price_per_kg
     unit_lookup = {
@@ -190,7 +191,7 @@ def build_revenue_schedules(
         "By-Product (feathers, offal, livers) Revenue": "kg",
     }
     broiler_rows: List[Dict[str, Any]] = []
-    for cycle in cycles:
+    for cycle in cycle_list:
         broiler_rows.append(
             {
                 "Category": "Broiler Revenue",
@@ -212,18 +213,42 @@ def build_revenue_schedules(
         "By-Product (feathers, offal, livers) Revenue": assumptions.byproduct_price_per_kg,
     }
 
+    default_yield_map = {
+        "Eggs Revenue": 0.06,  # dozens per surviving bird (proxy uplift assumption)
+        "Poultry Manure Revenue": 0.003,  # tons per surviving bird per cycle
+        "Live Birds Revenue": 1.0,  # heads per surviving bird
+        "By-Product (feathers, offal, livers) Revenue": 0.08,  # by-product kg per kg live weight
+    }
+
     for category in REVENUE_CATEGORIES[1:]:
         template_rows = []
         for period in range(1, template_periods + 1):
+            cycle = next((c for c in cycle_list if c.cycle == period), None)
+            survivors = cycle.survivors if cycle else round(
+                assumptions.birds_per_cycle * (1 - assumptions.mortality_rate)
+            )
+            live_weight_kg = (
+                cycle.live_weight_kg
+                if cycle
+                else survivors * assumptions.final_weight_kg
+            )
+            if category == "By-Product (feathers, offal, livers) Revenue":
+                units = live_weight_kg * default_yield_map[category]
+            else:
+                units = survivors * default_yield_map.get(category, 0.0)
+            unit_price_value = _to_float(price_lookup.get(category))
+            revenue = (
+                units * unit_price_value if unit_price_value is not None else None
+            )
             template_rows.append(
                 {
                     "Category": category,
                     "Period": f"Cycle {period}",
                     "Unit": unit_lookup.get(category, ""),
-                    "Units": None,
+                    "Units": units,
                     "Unit price": price_lookup.get(category),
-                    "Revenue": None,
-                    "Notes": "Template (enter values)",
+                    "Revenue": revenue,
+                    "Notes": "Auto-estimated from assumptions (editable)",
                 }
             )
         schedules[category] = template_rows

@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 from streamlit.delta_generator import DeltaGenerator
+from streamlit.errors import StreamlitAPIException
 
 from broiler_model.assumptions import Assumptions, ASSUMPTION_SCHEDULE_LAYOUT
 from broiler_model.analytics import (
@@ -2060,15 +2061,42 @@ def _render_schedule_editor(
     if instructions:
         st.caption(" ".join(instructions))
 
-    edited_df = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config=column_config,
-        disabled=not edit_enabled,
-        key=f"editor_{namespace}_{schedule_key}_{scenario}",
-    )
+    try:
+        edited_df = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config,
+            disabled=not edit_enabled,
+            key=f"editor_{namespace}_{schedule_key}_{scenario}",
+        )
+    except StreamlitAPIException:
+        fallback_df = df.copy()
+        for col in fallback_df.columns:
+            if col in {ROW_EDIT_COLUMN, ROW_REMOVAL_COLUMN}:
+                continue
+            if col in fixed_columns:
+                continue
+            series = fallback_df[col]
+            if series.dtype == object:
+                observed = {type(v) for v in series.dropna().tolist()}
+                if len(observed) > 1:
+                    fallback_df[col] = series.apply(
+                        lambda value: "" if pd.isna(value) else str(value)
+                    )
+        st.warning(
+            "Some columns had mixed data types. Falling back to text-safe editing "
+            "for compatibility."
+        )
+        edited_df = st.data_editor(
+            fallback_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            disabled=not edit_enabled,
+            key=f"editor_fallback_{namespace}_{schedule_key}_{scenario}",
+        )
 
     edited_df = pd.DataFrame(edited_df)
     row_form_applied = False

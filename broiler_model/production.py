@@ -182,12 +182,20 @@ def build_revenue_schedules(
     schedules: Dict[str, List[Dict[str, Any]]] = {}
 
     unit_price = assumptions.final_weight_kg * assumptions.live_price_per_kg
+    unit_lookup = {
+        "Broiler Revenue": "bird",
+        "Eggs Revenue": "dozen",
+        "Poultry Manure Revenue": "ton",
+        "Live Birds Revenue": "head",
+        "By-Product (feathers, offal, livers) Revenue": "kg",
+    }
     broiler_rows: List[Dict[str, Any]] = []
     for cycle in cycles:
         broiler_rows.append(
             {
                 "Category": "Broiler Revenue",
                 "Period": f"Cycle {cycle.cycle}",
+                "Unit": unit_lookup["Broiler Revenue"],
                 "Units": cycle.survivors,
                 "Unit price": unit_price,
                 "Revenue": cycle.revenue,
@@ -211,6 +219,7 @@ def build_revenue_schedules(
                 {
                     "Category": category,
                     "Period": f"Cycle {period}",
+                    "Unit": unit_lookup.get(category, ""),
                     "Units": None,
                     "Unit price": price_lookup.get(category),
                     "Revenue": None,

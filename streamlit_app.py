@@ -701,6 +701,119 @@ def _build_ic_pack_markdown(
     )
 
 
+def _generate_business_plan_excel_bytes(
+    scenario: str,
+    plan_markdown: str,
+    recommendations: List[str],
+    scorecard_df: pd.DataFrame,
+    confidence_df: pd.DataFrame,
+) -> bytes:
+    """Create a business-plan Excel workbook export."""
+
+    output = BytesIO()
+    try:
+        import xlsxwriter  # type: ignore  # noqa: F401
+
+        engine = "xlsxwriter"
+    except ImportError:
+        try:
+            import openpyxl  # type: ignore  # noqa: F401
+
+            engine = "openpyxl"
+        except ImportError as exc:
+            raise RuntimeError(
+                "Excel export requires `xlsxwriter` or `openpyxl`."
+            ) from exc
+
+    with pd.ExcelWriter(output, engine=engine) as writer:
+        pd.DataFrame([{"Section": "Business Plan", "Content": plan_markdown}]).to_excel(
+            writer, sheet_name="Business Plan", index=False
+        )
+        pd.DataFrame({"Recommendation": recommendations}).to_excel(
+            writer, sheet_name="Recommendations", index=False
+        )
+        scorecard_df.to_excel(writer, sheet_name="Scorecard", index=False)
+        confidence_df.to_excel(writer, sheet_name="Confidence Bands", index=False)
+
+        if engine == "xlsxwriter":
+            writer.book.set_properties(
+                {"title": f"Business Plan - {scenario}", "subject": "Investor pack"}
+            )
+
+    output.seek(0)
+    return output.getvalue()
+
+
+def _generate_business_plan_docx_bytes(
+    title: str,
+    plan_markdown: str,
+    recommendations: List[str],
+) -> bytes:
+    """Create a Word document export for the generated business plan."""
+
+    try:
+        from docx import Document  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("Word export requires `python-docx`.") from exc
+
+    document = Document()
+    document.add_heading(title, level=1)
+    for paragraph in plan_markdown.split("\n\n"):
+        stripped = paragraph.strip()
+        if stripped:
+            document.add_paragraph(stripped)
+
+    document.add_heading("Investor Recommendations", level=2)
+    for item in recommendations:
+        document.add_paragraph(item, style="List Bullet")
+
+    output = BytesIO()
+    document.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def _generate_business_plan_pdf_bytes(
+    title: str,
+    plan_markdown: str,
+    recommendations: List[str],
+) -> bytes:
+    """Create a PDF export for the generated business plan."""
+
+    try:
+        from reportlab.lib.pagesizes import letter  # type: ignore
+        from reportlab.pdfgen import canvas  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("PDF export requires `reportlab`.") from exc
+
+    output = BytesIO()
+    pdf = canvas.Canvas(output, pagesize=letter)
+    width, height = letter
+    y = height - 40
+
+    def _write_line(text: str, *, bold: bool = False) -> None:
+        nonlocal y
+        if y < 50:
+            pdf.showPage()
+            y = height - 40
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", 10)
+        pdf.drawString(40, y, text[:120])
+        y -= 14
+
+    _write_line(title, bold=True)
+    _write_line("")
+    for line in plan_markdown.splitlines():
+        _write_line(line)
+    _write_line("")
+    _write_line("Investor Recommendations", bold=True)
+    for item in recommendations:
+        _write_line(f"- {item}")
+
+    pdf.save()
+    output.seek(0)
+    return output.getvalue()
+
+
 def _tornado_chart(
     what_if_df: pd.DataFrame, scenario_df: pd.DataFrame
 ) -> Optional[alt.Chart]:
@@ -2827,6 +2940,61 @@ def main() -> None:
                 mime="text/markdown",
                 key=f"download_ic_pack_{selected_scenario}",
             )
+            export_title = f"Business Plan - {selected_scenario}"
+            export_cols = st.columns(3)
+            with export_cols[0]:
+                try:
+                    docx_bytes = _generate_business_plan_docx_bytes(
+                        export_title,
+                        plan_markdown,
+                        investor_recommendations,
+                    )
+                except RuntimeError as exc:
+                    st.warning(str(exc))
+                else:
+                    st.download_button(
+                        "Download Word (.docx)",
+                        data=docx_bytes,
+                        file_name=f"Business_Plan_{selected_scenario.replace(' ', '_')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key=f"download_business_plan_docx_{selected_scenario}",
+                    )
+            with export_cols[1]:
+                try:
+                    pdf_bytes = _generate_business_plan_pdf_bytes(
+                        export_title,
+                        plan_markdown,
+                        investor_recommendations,
+                    )
+                except RuntimeError as exc:
+                    st.warning(str(exc))
+                else:
+                    st.download_button(
+                        "Download PDF (.pdf)",
+                        data=pdf_bytes,
+                        file_name=f"Business_Plan_{selected_scenario.replace(' ', '_')}.pdf",
+                        mime="application/pdf",
+                        key=f"download_business_plan_pdf_{selected_scenario}",
+                    )
+            with export_cols[2]:
+                try:
+                    plan_excel_bytes = _generate_business_plan_excel_bytes(
+                        selected_scenario,
+                        plan_markdown,
+                        investor_recommendations,
+                        scorecard_df,
+                        confidence_df,
+                    )
+                except RuntimeError as exc:
+                    st.warning(str(exc))
+                else:
+                    st.download_button(
+                        "Download Excel (.xlsx)",
+                        data=plan_excel_bytes,
+                        file_name=f"Business_Plan_{selected_scenario.replace(' ', '_')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_business_plan_excel_{selected_scenario}",
+                    )
 
             summary_by_category = pd.DataFrame(revenue_summary.get("by_category", []))
             revenue_chart = _build_revenue_stack_chart(summary_by_category)

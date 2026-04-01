@@ -707,6 +707,7 @@ def _generate_business_plan_excel_bytes(
     recommendations: List[str],
     scorecard_df: pd.DataFrame,
     confidence_df: pd.DataFrame,
+    citations: Optional[List[Dict[str, str]]] = None,
 ) -> bytes:
     """Create a business-plan Excel workbook export."""
 
@@ -734,6 +735,10 @@ def _generate_business_plan_excel_bytes(
         )
         scorecard_df.to_excel(writer, sheet_name="Scorecard", index=False)
         confidence_df.to_excel(writer, sheet_name="Confidence Bands", index=False)
+        if citations:
+            pd.DataFrame(citations).to_excel(
+                writer, sheet_name="RAG Citations", index=False
+            )
 
         if engine == "xlsxwriter":
             writer.book.set_properties(
@@ -748,6 +753,7 @@ def _generate_business_plan_docx_bytes(
     title: str,
     plan_markdown: str,
     recommendations: List[str],
+    citations: Optional[List[Dict[str, str]]] = None,
 ) -> bytes:
     """Create a Word document export for the generated business plan."""
 
@@ -766,6 +772,13 @@ def _generate_business_plan_docx_bytes(
     document.add_heading("Investor Recommendations", level=2)
     for item in recommendations:
         document.add_paragraph(item, style="List Bullet")
+    if citations:
+        document.add_heading("RAG Source Citations", level=2)
+        for citation in citations:
+            document.add_paragraph(
+                f"{citation.get('section')}: {citation.get('source')} ({citation.get('chunk_id')})",
+                style="List Bullet",
+            )
 
     output = BytesIO()
     document.save(output)
@@ -777,6 +790,7 @@ def _generate_business_plan_pdf_bytes(
     title: str,
     plan_markdown: str,
     recommendations: List[str],
+    citations: Optional[List[Dict[str, str]]] = None,
 ) -> bytes:
     """Create a PDF export for the generated business plan."""
 
@@ -808,10 +822,153 @@ def _generate_business_plan_pdf_bytes(
     _write_line("Investor Recommendations", bold=True)
     for item in recommendations:
         _write_line(f"- {item}")
+    if citations:
+        _write_line("")
+        _write_line("RAG Source Citations", bold=True)
+        for citation in citations:
+            _write_line(
+                f"- {citation.get('section')}: {citation.get('source')} ({citation.get('chunk_id')})"
+            )
 
     pdf.save()
     output.seek(0)
     return output.getvalue()
+
+
+def _extract_text_from_upload(uploaded_file: Any) -> str:
+    """Extract text from uploaded files supporting txt/md/pdf/docx."""
+
+    file_name = getattr(uploaded_file, "name", "document")
+    suffix = file_name.lower().split(".")[-1] if "." in file_name else ""
+    file_bytes = uploaded_file.getvalue()
+
+    if suffix in {"txt", "md"}:
+        return file_bytes.decode("utf-8", errors="ignore")
+
+    if suffix == "pdf":
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except ImportError:
+            return ""
+        reader = PdfReader(BytesIO(file_bytes))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n".join(pages)
+
+    if suffix == "docx":
+        try:
+            from docx import Document  # type: ignore
+        except ImportError:
+            return ""
+        document = Document(BytesIO(file_bytes))
+        return "\n".join(p.text for p in document.paragraphs if p.text.strip())
+
+    return ""
+
+
+def _chunk_document_text(
+    source_name: str, text: str, chunk_size: int = 1200, overlap: int = 150
+) -> List[Dict[str, Any]]:
+    """Create overlapping chunks from a source document."""
+
+    clean_text = re.sub(r"\s+", " ", text).strip()
+    if not clean_text:
+        return []
+
+    chunks: List[Dict[str, Any]] = []
+    start = 0
+    idx = 1
+    while start < len(clean_text):
+        end = min(start + chunk_size, len(clean_text))
+        excerpt = clean_text[start:end].strip()
+        if excerpt:
+            chunks.append(
+                {
+                    "chunk_id": f"{source_name}::chunk_{idx}",
+                    "source": source_name,
+                    "text": excerpt,
+                }
+            )
+            idx += 1
+        if end >= len(clean_text):
+            break
+        start = max(0, end - overlap)
+
+    return chunks
+
+
+def _simple_tokenise(text: str) -> List[str]:
+    """Tokenise text for lightweight lexical retrieval."""
+
+    return re.findall(r"[a-zA-Z0-9]+", text.lower())
+
+
+def _retrieve_evidence_for_sections(
+    chunks: List[Dict[str, Any]],
+    section_queries: Dict[str, str],
+    top_k: int = 3,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Return top-k chunk matches per section using lexical overlap scoring."""
+
+    if not chunks:
+        return {section: [] for section in section_queries}
+
+    chunk_payload: List[Tuple[Dict[str, Any], set[str]]] = []
+    for chunk in chunks:
+        tokens = set(_simple_tokenise(chunk.get("text", "")))
+        chunk_payload.append((chunk, tokens))
+
+    section_matches: Dict[str, List[Dict[str, Any]]] = {}
+    for section, query in section_queries.items():
+        query_tokens = set(_simple_tokenise(query))
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for chunk, tokens in chunk_payload:
+            if not tokens:
+                continue
+            overlap = len(query_tokens & tokens)
+            if overlap <= 0:
+                continue
+            score = overlap / max(len(query_tokens), 1)
+            scored.append((score, chunk))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        section_matches[section] = [item[1] for item in scored[:top_k]]
+
+    return section_matches
+
+
+def _rewrite_plan_with_rag_evidence(
+    base_plan_markdown: str,
+    section_evidence: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[str, List[Dict[str, str]]]:
+    """Augment business plan narrative with RAG-backed evidence snippets."""
+
+    evidence_lines: List[str] = [
+        "## Evidence-backed research addendum",
+        "The following evidence was retrieved from uploaded documents and integrated into the plan:",
+        "",
+    ]
+    citations: List[Dict[str, str]] = []
+
+    for section, chunks in section_evidence.items():
+        evidence_lines.append(f"### {section}")
+        if not chunks:
+            evidence_lines.append("- No relevant evidence retrieved for this section.")
+            evidence_lines.append("")
+            continue
+        for idx, chunk in enumerate(chunks, start=1):
+            snippet = chunk.get("text", "").strip()[:260]
+            source = chunk.get("source", "Unknown source")
+            evidence_lines.append(f"- {snippet}... *(Source: {source})*")
+            citations.append(
+                {
+                    "section": section,
+                    "source": source,
+                    "chunk_id": chunk.get("chunk_id", f"{source}-{idx}"),
+                }
+            )
+        evidence_lines.append("")
+
+    rewritten = f"{base_plan_markdown}\n\n" + "\n".join(evidence_lines).strip()
+    return rewritten, citations
 
 
 def _tornado_chart(
@@ -2890,6 +3047,51 @@ def main() -> None:
             for entry in governance_log[-5:]:
                 st.markdown(f"- {entry.get('timestamp')}: {entry.get('event')}")
 
+        st.markdown("### RAG research library")
+        st.caption(
+            "Upload research papers/documents to ground business-plan rewrites with evidence."
+        )
+        uploaded_docs = st.file_uploader(
+            "Upload research documents",
+            type=["pdf", "docx", "txt", "md"],
+            accept_multiple_files=True,
+            key=f"rag_upload_{selected_scenario}",
+        )
+        rag_store = st.session_state.setdefault("rag_document_store", {})
+        rag_store.setdefault(selected_scenario, {"documents": [], "chunks": []})
+        if st.button(
+            "Index uploaded documents",
+            key=f"index_rag_documents_{selected_scenario}",
+        ):
+            documents: List[Dict[str, Any]] = []
+            all_chunks: List[Dict[str, Any]] = []
+            for uploaded in uploaded_docs or []:
+                extracted = _extract_text_from_upload(uploaded)
+                if not extracted.strip():
+                    st.warning(
+                        f"Could not parse text for `{uploaded.name}`. "
+                        "Install optional parser dependencies for this format if needed."
+                    )
+                    continue
+                doc_record = {
+                    "name": uploaded.name,
+                    "char_count": len(extracted),
+                }
+                documents.append(doc_record)
+                all_chunks.extend(_chunk_document_text(uploaded.name, extracted))
+            rag_store[selected_scenario] = {
+                "documents": documents,
+                "chunks": all_chunks,
+            }
+            st.session_state.rag_document_store = rag_store
+            st.success(
+                f"Indexed {len(documents)} document(s) into {len(all_chunks)} chunk(s)."
+            )
+
+        rag_docs = rag_store.get(selected_scenario, {}).get("documents", [])
+        rag_chunks = rag_store.get(selected_scenario, {}).get("chunks", [])
+        st.write(f"Indexed documents: **{len(rag_docs)}** | Chunks: **{len(rag_chunks)}**")
+
         st.divider()
         st.subheader("Business Plan Agent")
         st.caption(
@@ -2906,7 +3108,7 @@ def main() -> None:
             st.session_state[plan_state_key] = True
 
         if st.session_state.get(plan_state_key, False):
-            plan_markdown = _build_business_plan_markdown(
+            base_plan_markdown = _build_business_plan_markdown(
                 selected_scenario,
                 assumptions,
                 valuation,
@@ -2915,6 +3117,28 @@ def main() -> None:
                 break_even_df,
                 monte_carlo_summary_df,
             )
+            section_queries = {
+                "Executive Summary": "investment thesis return profile npv irr",
+                "Production & Operating Plan": "broiler operations feed conversion mortality throughput productivity",
+                "Financial Performance Plan": "ebitda cash flow dscr payback financing",
+                "Market, Pricing, and Break-even Strategy": "market demand price benchmark break-even",
+                "Risk Assessment & Mitigation": "risk volatility downside sensitivity scenario",
+                "Implementation Roadmap": "timeline milestones implementation plan",
+            }
+            rewrite_plan = st.button(
+                "Rewrite using RAG evidence",
+                key=f"rewrite_plan_with_rag_{selected_scenario}",
+                disabled=not rag_chunks,
+            )
+            citation_entries: List[Dict[str, str]] = []
+            if rewrite_plan and rag_chunks:
+                evidence = _retrieve_evidence_for_sections(rag_chunks, section_queries, top_k=3)
+                plan_markdown, citation_entries = _rewrite_plan_with_rag_evidence(
+                    base_plan_markdown, evidence
+                )
+                st.success("Business plan rewritten using indexed RAG evidence.")
+            else:
+                plan_markdown = base_plan_markdown
             st.markdown(plan_markdown)
             st.markdown("### Investor attractiveness recommendations")
             investor_recommendations = _generate_investor_recommendations(
@@ -2948,6 +3172,7 @@ def main() -> None:
                         export_title,
                         plan_markdown,
                         investor_recommendations,
+                        citation_entries,
                     )
                 except RuntimeError as exc:
                     st.warning(str(exc))
@@ -2965,6 +3190,7 @@ def main() -> None:
                         export_title,
                         plan_markdown,
                         investor_recommendations,
+                        citation_entries,
                     )
                 except RuntimeError as exc:
                     st.warning(str(exc))
@@ -2984,6 +3210,7 @@ def main() -> None:
                         investor_recommendations,
                         scorecard_df,
                         confidence_df,
+                        citation_entries,
                     )
                 except RuntimeError as exc:
                     st.warning(str(exc))

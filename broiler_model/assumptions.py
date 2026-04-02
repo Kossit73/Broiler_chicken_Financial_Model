@@ -35,7 +35,10 @@ class Assumptions:
     overhead_per_cycle: float = 2700.0
     capex_housing: float = 950000.0
     capex_equipment: float = 280000.0
-    working_capital: float = 60000.0
+    ar_days: float = 35.0
+    inventory_days: float = 25.0
+    ap_days: float = 20.0
+    working_capital: float = 60000.0  # legacy field retained for backward compatibility
     discount_rate: float = 0.1
     price_growth: float = 0.02
     cost_inflation: float = 0.015
@@ -77,7 +80,9 @@ ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Capital structure", "Housing capex", "capex_housing"),
     ("Capital structure", "Equipment capex", "capex_equipment"),
     ("Capital structure", "Maintenance capex (annual)", "maintenance_capex_annual"),
-    ("Capital structure", "Working capital", "working_capital"),
+    ("Capital structure", "AR days", "ar_days"),
+    ("Capital structure", "Inventory days", "inventory_days"),
+    ("Capital structure", "AP days", "ap_days"),
     ("Capital structure", "Depreciation years", "depreciation_years"),
     ("Financing", "Debt ratio", "debt_ratio"),
     ("Financing", "Debt interest rate", "debt_interest_rate"),

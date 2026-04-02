@@ -126,12 +126,19 @@ def discounted_cash_flow(
     rows: List[CashFlowRow] = []
     depreciation = base_annual.depreciation
     revenue = base_annual.revenue
-    base_working_capital = assumptions.working_capital
-    base_ar = base_working_capital * 0.4
-    base_inventory = base_working_capital * 0.8
-    base_ap = base_working_capital * 0.2
+    initial_revenue = revenue * (1 + assumptions.price_growth)
+    initial_variable_costs = (
+        base_annual.feed_cost
+        + base_annual.chick_cost
+        + base_annual.processing_cost
+        + base_annual.health_cost
+    ) * (1 + assumptions.cost_inflation)
+    base_ar = initial_revenue * (assumptions.ar_days / 365.0)
+    base_inventory = initial_variable_costs * (assumptions.inventory_days / 365.0)
+    base_ap = initial_variable_costs * (assumptions.ap_days / 365.0)
+    base_working_capital = max(0.0, base_ar + base_inventory - base_ap)
     previous_working_capital = base_working_capital
-    upfront_cash = -(equity + assumptions.working_capital)
+    upfront_cash = -(equity + base_working_capital)
     cumulative_cash = upfront_cash
     start_year = int(assumptions.production_start_year) if assumptions.production_start_year else 0
     rows.append(
@@ -195,10 +202,12 @@ def discounted_cash_flow(
         taxes = taxable_income * assumptions.tax_rate
         net_income = ebit - interest_expense - taxes
         operating_cash_flow = ebitda - taxes
-        accounts_receivable = base_ar * ((1 + assumptions.price_growth) ** year)
-        inventory = base_inventory * ((1 + assumptions.cost_inflation) ** year)
-        accounts_payable = base_ap * ((1 + assumptions.cost_inflation) ** year)
-        target_working_capital = max(0.0, accounts_receivable + inventory - accounts_payable)
+        accounts_receivable = revenue * (assumptions.ar_days / 365.0)
+        inventory = variable_costs * (assumptions.inventory_days / 365.0)
+        accounts_payable = variable_costs * (assumptions.ap_days / 365.0)
+        target_working_capital = max(
+            0.0, accounts_receivable + inventory - accounts_payable
+        )
         change_in_working_capital = target_working_capital - previous_working_capital
         if year == projection_years:
             # Release working capital at project end.
@@ -262,14 +271,17 @@ def build_financial_statements(
     depreciation = (
         assumptions.capex_housing + assumptions.capex_equipment
     ) / assumptions.depreciation_years
+    initial_working_capital = (
+        cashflows[0].ending_working_capital if cashflows else 0.0
+    )
     equity_base = total_capex * (1 - assumptions.debt_ratio)
-    equity_total = equity_base + assumptions.working_capital
+    equity_total = equity_base + initial_working_capital
 
     income_rows: List[IncomeStatementRow] = []
     cash_statement: List[CashFlowStatementRow] = []
     balance_rows: List[BalanceSheetRow] = []
 
-    investing_cash = -(total_capex + assumptions.working_capital)
+    investing_cash = -(total_capex + initial_working_capital)
     financing_cash = equity_total + (total_capex * assumptions.debt_ratio)
     net_change = investing_cash + financing_cash
     cash_balance = net_change
@@ -293,10 +305,10 @@ def build_financial_statements(
                 BalanceSheetRow(
                     year=0,
                     cash=cash_balance,
-                    working_capital=assumptions.working_capital,
+                    working_capital=initial_working_capital,
                     net_ppe=total_capex,
                     total_assets=total_capex
-                    + assumptions.working_capital
+                    + initial_working_capital
                     + cash_balance,
                     debt=total_capex * assumptions.debt_ratio,
                     equity=equity_total + cash_balance,

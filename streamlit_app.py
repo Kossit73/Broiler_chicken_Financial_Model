@@ -1614,6 +1614,7 @@ def _reset_scenario_edit_states(scenario: str) -> None:
     """Clear per-scenario editable table caches so new assumptions fully propagate."""
 
     for namespace in (
+        "assumption_schedule_state",
         "revenue_schedule_state",
         "advanced_schedule_state",
         "custom_simulation_state",

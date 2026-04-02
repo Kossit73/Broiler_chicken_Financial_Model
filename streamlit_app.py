@@ -1552,6 +1552,38 @@ def _initialise_schedule_state(
         if stored_data == stored_default and stored_default != default_records:
             state["data"] = copy.deepcopy(default_records)
             state["default"] = copy.deepcopy(default_records)
+        else:
+            if default_records and stored_data:
+                sample_default = default_records[0]
+                sample_stored = stored_data[0] if isinstance(stored_data[0], dict) else {}
+                key_fields = [
+                    field
+                    for field in ("Category", "Period")
+                    if field in sample_default and field in sample_stored
+                ]
+                if key_fields:
+                    default_key_set = {
+                        tuple(row.get(field) for field in key_fields)
+                        for row in default_records
+                    }
+                    stored_key_map = {
+                        tuple(row.get(field) for field in key_fields): row
+                        for row in stored_data
+                        if isinstance(row, dict)
+                    }
+                    needs_reconcile = set(stored_key_map) != default_key_set
+                    if needs_reconcile:
+                        reconciled_rows: List[Dict[str, Any]] = []
+                        for default_row in default_records:
+                            key = tuple(default_row.get(field) for field in key_fields)
+                            if key in stored_key_map:
+                                merged = copy.deepcopy(default_row)
+                                merged.update(stored_key_map[key])
+                                reconciled_rows.append(merged)
+                            else:
+                                reconciled_rows.append(copy.deepcopy(default_row))
+                        state["data"] = reconciled_rows
+                        state["default"] = copy.deepcopy(default_records)
     df = pd.DataFrame(state.get("data", default_records))
     return df, state
 

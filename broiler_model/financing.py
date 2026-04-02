@@ -30,6 +30,11 @@ class CashFlowRow:
     present_value: float
     ending_debt: float
     cumulative_cash: float
+    accounts_receivable: float = 0.0
+    inventory: float = 0.0
+    accounts_payable: float = 0.0
+    change_in_working_capital: float = 0.0
+    ending_working_capital: float = 0.0
     calendar_year: Optional[int] = None
 
 
@@ -121,6 +126,11 @@ def discounted_cash_flow(
     rows: List[CashFlowRow] = []
     depreciation = base_annual.depreciation
     revenue = base_annual.revenue
+    base_working_capital = assumptions.working_capital
+    base_ar = base_working_capital * 0.4
+    base_inventory = base_working_capital * 0.8
+    base_ap = base_working_capital * 0.2
+    previous_working_capital = base_working_capital
     upfront_cash = -(equity + assumptions.working_capital)
     cumulative_cash = upfront_cash
     start_year = int(assumptions.production_start_year) if assumptions.production_start_year else 0
@@ -145,6 +155,7 @@ def discounted_cash_flow(
             present_value=upfront_cash,
             ending_debt=debt,
             cumulative_cash=cumulative_cash,
+            ending_working_capital=base_working_capital,
             calendar_year=start_year - 1 if start_year else None,
         )
     )
@@ -184,14 +195,25 @@ def discounted_cash_flow(
         taxes = taxable_income * assumptions.tax_rate
         net_income = ebit - interest_expense - taxes
         operating_cash_flow = ebitda - taxes
+        accounts_receivable = base_ar * ((1 + assumptions.price_growth) ** year)
+        inventory = base_inventory * ((1 + assumptions.cost_inflation) ** year)
+        accounts_payable = base_ap * ((1 + assumptions.cost_inflation) ** year)
+        target_working_capital = max(0.0, accounts_receivable + inventory - accounts_payable)
+        change_in_working_capital = target_working_capital - previous_working_capital
+        if year == projection_years:
+            # Release working capital at project end.
+            change_in_working_capital -= target_working_capital
+            target_working_capital = 0.0
         free_cash_flow = (
             operating_cash_flow
             - assumptions.maintenance_capex_annual
             - debt_service
+            - change_in_working_capital
         )
         discount_factor = (1 + assumptions.discount_rate) ** year
         present_value = free_cash_flow / discount_factor
         cumulative_cash += free_cash_flow
+        previous_working_capital = target_working_capital
 
         rows.append(
             CashFlowRow(
@@ -214,6 +236,11 @@ def discounted_cash_flow(
                 present_value=present_value,
                 ending_debt=ending_balance,
                 cumulative_cash=cumulative_cash,
+                accounts_receivable=accounts_receivable,
+                inventory=inventory,
+                accounts_payable=accounts_payable,
+                change_in_working_capital=change_in_working_capital,
+                ending_working_capital=target_working_capital,
                 calendar_year=start_year + year - 1 if start_year else None,
             )
         )
@@ -305,7 +332,7 @@ def build_financial_statements(
             )
         )
 
-        operating_cash = row.net_income + row.depreciation
+        operating_cash = row.net_income + row.depreciation - row.change_in_working_capital
         investing_cash = -assumptions.maintenance_capex_annual
         financing_cash = -row.principal_payment
         net_change = operating_cash + investing_cash + financing_cash
@@ -325,7 +352,7 @@ def build_financial_statements(
         accum_dep = min(row.year, assumptions.depreciation_years) * depreciation
         net_ppe = max(0.0, total_capex - accum_dep)
         debt_balance = row.ending_debt if row.ending_debt else 0.0
-        total_assets = cash_balance + assumptions.working_capital + net_ppe
+        total_assets = cash_balance + row.ending_working_capital + net_ppe
         equity = total_assets - debt_balance
         retained = equity - equity_total
         debt_to_equity = (debt_balance / equity) if equity else None
@@ -333,7 +360,7 @@ def build_financial_statements(
             BalanceSheetRow(
                 year=row.year,
                 cash=cash_balance,
-                working_capital=assumptions.working_capital,
+                working_capital=row.ending_working_capital,
                 net_ppe=net_ppe,
                 total_assets=total_assets,
                 debt=debt_balance,

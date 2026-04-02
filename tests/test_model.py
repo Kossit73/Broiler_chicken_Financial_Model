@@ -133,8 +133,8 @@ class CLIBaselineRegressionTests(unittest.TestCase):
             with valuation_path.open() as fh:
                 valuation = json.load(fh)
 
-            self.assertAlmostEqual(valuation["npv"], -834068.11, delta=1_500)
-            self.assertAlmostEqual(valuation["irr"], -0.2053, delta=0.01)
+            self.assertAlmostEqual(valuation["npv"], -813371.45, delta=1_500)
+            self.assertAlmostEqual(valuation["irr"], -0.1663, delta=0.01)
 
             dscr_path = out_dir / "dscr_summary.csv"
             self.assertTrue(dscr_path.exists())

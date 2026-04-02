@@ -10,6 +10,7 @@ from io import BytesIO
 import json
 import math
 import re
+import zipfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple, get_type_hints
 
 import pandas as pd
@@ -1475,6 +1476,82 @@ def _generate_excel_bytes(
     return buffer.getvalue()
 
 
+def _generate_csv_zip_bytes(
+    model: ScenarioModel, results: Dict[str, Any], scenario: str
+) -> bytes:
+    """Create a ZIP bundle of CSV reports in memory for the supplied scenario results."""
+
+    def _csv_ready_df(frame: pd.DataFrame) -> pd.DataFrame:
+        safe = frame.copy()
+        if safe.empty:
+            return safe
+        for column in safe.columns:
+            if safe[column].dtype == object:
+                safe[column] = safe[column].apply(
+                    lambda value: json.dumps(value)
+                    if isinstance(value, (dict, list, tuple, set))
+                    else value
+                )
+        return safe
+
+    export_frames: Dict[str, pd.DataFrame] = {
+        "assumptions_schedule.csv": pd.DataFrame(results["assumptions_schedule"]),
+        "input_values.csv": pd.DataFrame([asdict(model.assumptions)]),
+        "production_cycles.csv": pd.DataFrame([asdict(cycle) for cycle in results["cycles"]]),
+        "annual_summary.csv": pd.DataFrame([asdict(results["annual"])]),
+        "cash_flows.csv": pd.DataFrame([asdict(row) for row in results["cashflows"]]),
+        "valuation.csv": pd.DataFrame([results["valuation"]]),
+    }
+
+    financials = results["financial_statements"]
+    export_frames.update(
+        {
+            "income_statement.csv": pd.DataFrame(
+                [asdict(row) for row in financials["income_statement"]]
+            ),
+            "balance_sheet.csv": pd.DataFrame(
+                [asdict(row) for row in financials["balance_sheet"]]
+            ),
+            "cash_flow_statement.csv": pd.DataFrame(
+                [asdict(row) for row in financials["cash_flow_statement"]]
+            ),
+            "debt_schedule.csv": pd.DataFrame(financials["loan_schedule"]),
+        }
+    )
+
+    advanced = results["advanced_analytics"]
+    export_frames.update(
+        {
+            "advanced_metrics.csv": pd.DataFrame(advanced["metrics"]),
+            "dscr.csv": pd.DataFrame(advanced["dscr"]),
+            "trend_analysis.csv": pd.DataFrame(advanced["trend"]),
+        }
+    )
+
+    for category, rows in results["revenue_schedules"].items():
+        safe_name = re.sub(r"[^a-z0-9]+", "_", category.lower()).strip("_")
+        export_frames[f"revenue_{safe_name or 'schedule'}.csv"] = pd.DataFrame(rows)
+
+    ai_settings = st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS)
+    export_frames["ai_settings.csv"] = pd.DataFrame([ai_settings])
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "README.txt",
+            (
+                f"Broiler chicken financial model export for scenario: {scenario}\n"
+                "This archive contains CSV versions of report tabs that are normally "
+                "included in the Excel workbook export.\n"
+            ),
+        )
+        for filename, frame in export_frames.items():
+            archive.writestr(filename, _csv_ready_df(frame).to_csv(index=False))
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 AI_PROVIDER_OPTIONS = (
     "OpenAI",
     "Anthropic",
@@ -2878,12 +2955,14 @@ def main() -> None:
 
     with production_tab:
         download_container = st.container()
-        excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
-        excel_bytes = excel_map.get(selected_scenario)
+        export_map: Dict[str, Dict[str, Any]] = st.session_state.setdefault(
+            "model_export_map", {}
+        )
+        export_payload = export_map.get(selected_scenario)
 
         with download_container:
             st.markdown("### Excel export")
-            if not excel_bytes:
+            if not export_payload:
                 if st.button(
                     "Prepare Excel Model",
                     key=f"prepare_excel_{selected_scenario.lower()}",
@@ -2893,28 +2972,53 @@ def main() -> None:
                             excel_bytes = _generate_excel_bytes(
                                 model, results, selected_scenario
                             )
-                    except RuntimeError:
-                        excel_bytes = None
+                    except RuntimeError as exc:
+                        if "Missing Excel writer dependency" in str(exc):
+                            with st.spinner("Preparing CSV ZIP fallback export..."):
+                                csv_zip_bytes = _generate_csv_zip_bytes(
+                                    model, results, selected_scenario
+                                )
+                            export_payload = {
+                                "data": csv_zip_bytes,
+                                "file_name": f"Broiler_Financial_Model_{selected_scenario.replace(' ', '_')}_CSV_Export.zip",
+                                "mime": "application/zip",
+                                "label": "Download CSV ZIP Export",
+                                "fallback": True,
+                            }
+                        else:
+                            export_payload = None
                     else:
-                        excel_map[selected_scenario] = excel_bytes
-                        st.session_state.excel_bytes_map = excel_map
-            if excel_bytes:
-                download_name = f"Broiler_Financial_Model_{selected_scenario.replace(' ', '_')}.xlsx"
+                        export_payload = {
+                            "data": excel_bytes,
+                            "file_name": f"Broiler_Financial_Model_{selected_scenario.replace(' ', '_')}.xlsx",
+                            "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "label": "Download Excel Model",
+                            "fallback": False,
+                        }
+
+                    if export_payload:
+                        export_map[selected_scenario] = export_payload
+                        st.session_state.model_export_map = export_map
+            if export_payload:
+                if export_payload.get("fallback"):
+                    st.warning(
+                        "Excel writer dependencies are unavailable. Downloading a CSV ZIP export instead."
+                    )
                 st.download_button(
-                    "Download Excel Model",
-                    data=excel_bytes,
-                    file_name=download_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    export_payload.get("label", "Download Model Export"),
+                    data=export_payload["data"],
+                    file_name=export_payload["file_name"],
+                    mime=export_payload["mime"],
                     key=f"download_excel_{selected_scenario.lower()}",
                 )
                 if st.button(
                     "Clear Prepared Excel",
                     key=f"clear_excel_{selected_scenario.lower()}",
                 ):
-                    excel_map.pop(selected_scenario, None)
-                    st.session_state.excel_bytes_map = excel_map
-                    excel_bytes = None
-            if not excel_bytes:
+                    export_map.pop(selected_scenario, None)
+                    st.session_state.model_export_map = export_map
+                    export_payload = None
+            if not export_payload:
                 st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
         st.subheader("Assumptions summary")

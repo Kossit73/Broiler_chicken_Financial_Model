@@ -1588,6 +1588,20 @@ def _initialise_schedule_state(
     return df, state
 
 
+def _reset_scenario_edit_states(scenario: str) -> None:
+    """Clear per-scenario editable table caches so new assumptions fully propagate."""
+
+    for namespace in (
+        "revenue_schedule_state",
+        "advanced_schedule_state",
+        "custom_simulation_state",
+    ):
+        store = st.session_state.get(namespace)
+        if isinstance(store, dict) and scenario in store:
+            store.pop(scenario, None)
+            st.session_state[namespace] = store
+
+
 def _coerce_assumption_value(key: str, raw_value: Any, current_value: Any) -> Any:
     """Convert schedule entries back to the dataclass field types."""
 
@@ -2706,6 +2720,7 @@ def main() -> None:
     previous_assumptions = copy.deepcopy(payload.get("assumptions", {}))
     payload["assumptions"] = asdict(assumptions)
     if previous_assumptions != payload["assumptions"]:
+        _reset_scenario_edit_states(selected_scenario)
         governance_store = st.session_state.setdefault("governance_log", {})
         scenario_log = governance_store.setdefault(selected_scenario, [])
         scenario_log.append(

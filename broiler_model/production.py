@@ -291,7 +291,8 @@ def summarise_revenue_totals(
                 row["Revenue"] = revenue_value
 
             if value is None:
-                continue
+                value = 0.0
+                row["Revenue"] = 0.0
 
             year = (idx // cycles) + 1
             category_totals[year] = category_totals.get(year, 0.0) + value

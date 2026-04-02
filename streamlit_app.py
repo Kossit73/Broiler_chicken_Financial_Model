@@ -710,6 +710,8 @@ def _generate_business_plan_excel_bytes(
     scorecard_df: pd.DataFrame,
     confidence_df: pd.DataFrame,
     citations: Optional[List[Dict[str, str]]] = None,
+    financial_tables: Optional[Dict[str, pd.DataFrame]] = None,
+    chart_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> bytes:
     """Create a business-plan Excel workbook export."""
 
@@ -741,6 +743,40 @@ def _generate_business_plan_excel_bytes(
             pd.DataFrame(citations).to_excel(
                 writer, sheet_name="RAG Citations", index=False
             )
+        if financial_tables:
+            for sheet_name, table in financial_tables.items():
+                safe_sheet_name = re.sub(r"[^A-Za-z0-9 ]+", "", sheet_name).strip()
+                safe_sheet_name = safe_sheet_name[:31] or "Model Data"
+                export_df = table.copy()
+                for column in export_df.columns:
+                    if export_df[column].dtype == object:
+                        export_df[column] = export_df[column].apply(
+                            lambda value: json.dumps(value)
+                            if isinstance(value, (dict, list, tuple, set))
+                            else value
+                        )
+                export_df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+        if chart_payloads:
+            chart_index_rows: List[Dict[str, str]] = []
+            for chart_name, payload in chart_payloads.items():
+                safe_name = re.sub(r"[^A-Za-z0-9 ]+", "", chart_name).strip() or "Chart"
+                data_sheet = f"{safe_name} Data"[:31]
+                spec_sheet = f"{safe_name} Spec"[:31]
+                data_frame = payload.get("data")
+                if isinstance(data_frame, pd.DataFrame):
+                    data_frame.to_excel(writer, sheet_name=data_sheet, index=False)
+                spec = payload.get("spec")
+                if spec:
+                    pd.DataFrame(
+                        [{"chart": chart_name, "vega_lite_spec_json": json.dumps(spec)}]
+                    ).to_excel(writer, sheet_name=spec_sheet, index=False)
+                chart_index_rows.append(
+                    {"Chart": chart_name, "Data Sheet": data_sheet, "Spec Sheet": spec_sheet}
+                )
+            if chart_index_rows:
+                pd.DataFrame(chart_index_rows).to_excel(
+                    writer, sheet_name="Charts Index", index=False
+                )
 
         if engine == "xlsxwriter":
             writer.book.set_properties(
@@ -3422,6 +3458,87 @@ def main() -> None:
                         key=f"download_business_plan_pdf_{selected_scenario}",
                     )
             with export_cols[2]:
+                business_plan_tables: Dict[str, pd.DataFrame] = {
+                    "Assumptions Schedule": assumption_schedule_df,
+                    "Project Input Values": pd.DataFrame([asdict(assumptions)]),
+                    "Production Cycles": cycles_df,
+                    "Annual Summary": annual_df,
+                    "Cash Flow Projections": cashflow_df,
+                    "Valuation Analysis": valuation_df,
+                    "Income Statement": income_df,
+                    "Statement of Financial Position": balance_df,
+                    "Cash Flow Statement": statement_cf_df,
+                    "Debt Schedule": loan_df,
+                    "Revenue Summary by Year": annual_totals_df,
+                    "Revenue Summary by Category": summary_by_category,
+                    "Advanced Metrics": metrics_df,
+                    "DSCR Schedule": dscr_df,
+                    "Trend Analysis": trend_df,
+                    "Interest Coverage": coverage_df,
+                    "Leverage Metrics": leverage_df,
+                    "What If Analysis": what_if_df,
+                    "Break Even Analysis": break_even_df,
+                    "Scenario Planning": scenario_df,
+                    "Forecast Projections": forecast_df,
+                    "Time Series Projections": time_series_df,
+                    "Risk and Anomaly Log": risk_df,
+                    "ML Methods": ml_methods_df,
+                    "Monte Carlo Summary": monte_carlo_summary_df,
+                    "Monte Carlo Samples": monte_carlo_samples_df,
+                }
+                for category, rows in revenue_schedules.items():
+                    safe_key = f"Revenue Schedule {category}"
+                    business_plan_tables[safe_key] = pd.DataFrame(rows)
+                business_plan_tables = {
+                    key: value
+                    for key, value in business_plan_tables.items()
+                    if isinstance(value, pd.DataFrame) and not value.empty
+                }
+
+                revenue_chart = _build_revenue_stack_chart(summary_by_category)
+                income_mix_chart = _build_income_composition_chart(income_df)
+                leverage_chart = _combined_leverage_chart(dscr_df, coverage_df, leverage_df)
+
+                mc_chart: Optional[alt.Chart] = None
+                if not monte_carlo_samples_df.empty and {"iteration", "npv"}.issubset(
+                    monte_carlo_samples_df.columns
+                ):
+                    mc_chart = (
+                        alt.Chart(monte_carlo_samples_df)
+                        .mark_bar(opacity=0.8)
+                        .encode(
+                            x=alt.X("npv:Q", bin=alt.Bin(maxbins=40), title="NPV (USD)"),
+                            y=alt.Y("count():Q", title="Frequency"),
+                            tooltip=[alt.Tooltip("count():Q", title="Samples")],
+                        )
+                    )
+
+                chart_payloads: Dict[str, Dict[str, Any]] = {}
+                if revenue_chart is not None:
+                    chart_payloads["Revenue Mix and Growth"] = {
+                        "data": summary_by_category,
+                        "spec": revenue_chart.to_dict(),
+                    }
+                if income_mix_chart is not None:
+                    chart_payloads["Profitability Profile"] = {
+                        "data": income_df,
+                        "spec": income_mix_chart.to_dict(),
+                    }
+                if leverage_chart is not None:
+                    leverage_chart_data = pd.concat(
+                        [df for df in [dscr_df, coverage_df, leverage_df] if not df.empty],
+                        axis=1,
+                    )
+                    chart_payloads["Leverage and Resilience"] = {
+                        "data": leverage_chart_data,
+                        "spec": leverage_chart.to_dict(),
+                    }
+                if mc_chart is not None:
+                    chart_payloads["NPV Risk Distribution"] = {
+                        "data": monte_carlo_samples_df,
+                        "spec": mc_chart.to_dict(),
+                    }
+
                 try:
                     plan_excel_bytes = _generate_business_plan_excel_bytes(
                         selected_scenario,
@@ -3430,6 +3547,8 @@ def main() -> None:
                         scorecard_df,
                         confidence_df,
                         citation_entries,
+                        financial_tables=business_plan_tables,
+                        chart_payloads=chart_payloads,
                     )
                 except RuntimeError as exc:
                     st.warning(str(exc))
@@ -3458,18 +3577,7 @@ def main() -> None:
                 st.markdown("#### Leverage and debt-service resilience")
                 st.altair_chart(leverage_chart, use_container_width=True)
 
-            if not monte_carlo_samples_df.empty and {"iteration", "npv"}.issubset(
-                monte_carlo_samples_df.columns
-            ):
-                mc_chart = (
-                    alt.Chart(monte_carlo_samples_df)
-                    .mark_bar(opacity=0.8)
-                    .encode(
-                        x=alt.X("npv:Q", bin=alt.Bin(maxbins=40), title="NPV (USD)"),
-                        y=alt.Y("count():Q", title="Frequency"),
-                        tooltip=[alt.Tooltip("count():Q", title="Samples")],
-                    )
-                )
+            if mc_chart is not None:
                 st.markdown("#### NPV risk distribution")
                 st.altair_chart(mc_chart, use_container_width=True)
 

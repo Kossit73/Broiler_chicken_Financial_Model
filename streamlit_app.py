@@ -1377,77 +1377,99 @@ def _generate_excel_bytes(
             )
             raise RuntimeError("Missing Excel writer dependency") from exc
 
-    with pd.ExcelWriter(buffer, engine=engine) as writer:
-        assumptions_df = pd.DataFrame(results["assumptions_schedule"])
-        assumptions_df.to_excel(writer, sheet_name="Assumptions", index=False)
+    def _excel_ready_df(frame: pd.DataFrame) -> pd.DataFrame:
+        safe = frame.copy()
+        if safe.empty:
+            return safe
+        for column in safe.columns:
+            if safe[column].dtype == object:
+                safe[column] = safe[column].apply(
+                    lambda value: json.dumps(value)
+                    if isinstance(value, (dict, list, tuple, set))
+                    else value
+                )
+        return safe
 
-        input_df = pd.DataFrame([asdict(model.assumptions)])
-        input_df.to_excel(writer, sheet_name="Input Values", index=False)
-
-        cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])
-        cycles_df.to_excel(writer, sheet_name="Production Cycles", index=False)
-
-        annual_df = pd.DataFrame([asdict(results["annual"])])
-        annual_df.to_excel(writer, sheet_name="Annual Summary", index=False)
-
-        cashflows_df = pd.DataFrame([asdict(row) for row in results["cashflows"]])
-        cashflows_df.to_excel(writer, sheet_name="Cash Flows", index=False)
-
-        valuation_df = pd.DataFrame([results["valuation"]])
-        valuation_df.to_excel(writer, sheet_name="Valuation", index=False)
-
-        financials = results["financial_statements"]
-        pd.DataFrame([asdict(row) for row in financials["income_statement"]]).to_excel(
-            writer, sheet_name="Income Statement", index=False
-        )
-        pd.DataFrame([asdict(row) for row in financials["balance_sheet"]]).to_excel(
-            writer, sheet_name="Balance Sheet", index=False
-        )
-        pd.DataFrame([asdict(row) for row in financials["cash_flow_statement"]]).to_excel(
-            writer, sheet_name="Cash Flow Statement", index=False
-        )
-        pd.DataFrame(financials["loan_schedule"]).to_excel(
-            writer, sheet_name="Debt Schedule", index=False
-        )
-
-        advanced = results["advanced_analytics"]
-        pd.DataFrame(advanced["metrics"]).to_excel(
-            writer, sheet_name="Advanced Metrics", index=False
-        )
-        pd.DataFrame(advanced["dscr"]).to_excel(writer, sheet_name="DSCR", index=False)
-        pd.DataFrame(advanced["trend"]).to_excel(
-            writer, sheet_name="Trend Analysis", index=False
-        )
-
-        for category, rows in results["revenue_schedules"].items():
-            safe_name = (
-                category.replace("(", "")
-                .replace(")", "")
-                .replace(",", "")
-                .replace("-", " ")
+    try:
+        with pd.ExcelWriter(buffer, engine=engine) as writer:
+            _excel_ready_df(pd.DataFrame(results["assumptions_schedule"])).to_excel(
+                writer, sheet_name="Assumptions", index=False
             )
-            safe_name = " ".join(word.title() for word in safe_name.split())
-            pd.DataFrame(rows).to_excel(
-                writer, sheet_name=safe_name[:31] or "Revenue", index=False
+            _excel_ready_df(pd.DataFrame([asdict(model.assumptions)])).to_excel(
+                writer, sheet_name="Input Values", index=False
+            )
+            _excel_ready_df(pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])).to_excel(
+                writer, sheet_name="Production Cycles", index=False
+            )
+            _excel_ready_df(pd.DataFrame([asdict(results["annual"])])).to_excel(
+                writer, sheet_name="Annual Summary", index=False
+            )
+            _excel_ready_df(pd.DataFrame([asdict(row) for row in results["cashflows"]])).to_excel(
+                writer, sheet_name="Cash Flows", index=False
+            )
+            _excel_ready_df(pd.DataFrame([results["valuation"]])).to_excel(
+                writer, sheet_name="Valuation", index=False
             )
 
-        ai_settings = st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS)
-        pd.DataFrame([ai_settings]).to_excel(writer, sheet_name="AI Settings", index=False)
-
-        workbook = writer.book
-        if engine == "xlsxwriter":
-            workbook.set_properties(
-                {
-                    "title": f"Broiler Model - {scenario}",
-                    "subject": "Broiler chicken financial model",
-                    "comments": "Generated via Streamlit dashboard",
-                }
+            financials = results["financial_statements"]
+            _excel_ready_df(pd.DataFrame([asdict(row) for row in financials["income_statement"]])).to_excel(
+                writer, sheet_name="Income Statement", index=False
             )
-        else:
-            props = workbook.properties
-            props.title = f"Broiler Model - {scenario}"
-            props.subject = "Broiler chicken financial model"
-            props.comments = "Generated via Streamlit dashboard"
+            _excel_ready_df(pd.DataFrame([asdict(row) for row in financials["balance_sheet"]])).to_excel(
+                writer, sheet_name="Balance Sheet", index=False
+            )
+            _excel_ready_df(pd.DataFrame([asdict(row) for row in financials["cash_flow_statement"]])).to_excel(
+                writer, sheet_name="Cash Flow Statement", index=False
+            )
+            _excel_ready_df(pd.DataFrame(financials["loan_schedule"])).to_excel(
+                writer, sheet_name="Debt Schedule", index=False
+            )
+
+            advanced = results["advanced_analytics"]
+            _excel_ready_df(pd.DataFrame(advanced["metrics"])).to_excel(
+                writer, sheet_name="Advanced Metrics", index=False
+            )
+            _excel_ready_df(pd.DataFrame(advanced["dscr"])).to_excel(
+                writer, sheet_name="DSCR", index=False
+            )
+            _excel_ready_df(pd.DataFrame(advanced["trend"])).to_excel(
+                writer, sheet_name="Trend Analysis", index=False
+            )
+
+            for category, rows in results["revenue_schedules"].items():
+                safe_name = (
+                    category.replace("(", "")
+                    .replace(")", "")
+                    .replace(",", "")
+                    .replace("-", " ")
+                )
+                safe_name = " ".join(word.title() for word in safe_name.split())
+                _excel_ready_df(pd.DataFrame(rows)).to_excel(
+                    writer, sheet_name=safe_name[:31] or "Revenue", index=False
+                )
+
+            ai_settings = st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS)
+            _excel_ready_df(pd.DataFrame([ai_settings])).to_excel(
+                writer, sheet_name="AI Settings", index=False
+            )
+
+            workbook = writer.book
+            if engine == "xlsxwriter":
+                workbook.set_properties(
+                    {
+                        "title": f"Broiler Model - {scenario}",
+                        "subject": "Broiler chicken financial model",
+                        "comments": "Generated via Streamlit dashboard",
+                    }
+                )
+            else:
+                props = workbook.properties
+                props.title = f"Broiler Model - {scenario}"
+                props.subject = "Broiler chicken financial model"
+                props.comments = "Generated via Streamlit dashboard"
+    except Exception as exc:  # pragma: no cover - surfaced in UI
+        st.error(f"Excel export failed due to serialization issue: {exc}")
+        raise RuntimeError("Excel export serialization failure") from exc
 
     buffer.seek(0)
     return buffer.getvalue()

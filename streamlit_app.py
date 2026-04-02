@@ -726,9 +726,7 @@ def _generate_business_plan_excel_bytes(
 
             engine = "openpyxl"
         except ImportError as exc:
-            raise RuntimeError(
-                "Excel export requires `xlsxwriter` or `openpyxl`."
-            ) from exc
+            raise RuntimeError("Missing Excel writer dependency") from exc
 
     with pd.ExcelWriter(output, engine=engine) as writer:
         pd.DataFrame([{"Section": "Business Plan", "Content": plan_markdown}]).to_excel(
@@ -785,6 +783,73 @@ def _generate_business_plan_excel_bytes(
 
     output.seek(0)
     return output.getvalue()
+
+
+def _generate_business_plan_csv_zip_bytes(
+    scenario: str,
+    plan_markdown: str,
+    recommendations: List[str],
+    scorecard_df: pd.DataFrame,
+    confidence_df: pd.DataFrame,
+    citations: Optional[List[Dict[str, str]]] = None,
+    financial_tables: Optional[Dict[str, pd.DataFrame]] = None,
+    chart_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> bytes:
+    """Create a ZIP of CSV/JSON artifacts when Excel engines are unavailable."""
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "README.txt",
+            (
+                f"Business plan export for scenario: {scenario}\n"
+                "Excel engines were unavailable, so this ZIP includes CSV and JSON artifacts.\n"
+            ),
+        )
+        archive.writestr("business_plan.md", plan_markdown)
+        archive.writestr(
+            "recommendations.csv",
+            pd.DataFrame({"Recommendation": recommendations}).to_csv(index=False),
+        )
+        archive.writestr("scorecard.csv", scorecard_df.to_csv(index=False))
+        archive.writestr("confidence_bands.csv", confidence_df.to_csv(index=False))
+        if citations:
+            archive.writestr("rag_citations.csv", pd.DataFrame(citations).to_csv(index=False))
+        if financial_tables:
+            for name, table in financial_tables.items():
+                safe_name = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+                archive.writestr(
+                    f"tables/{safe_name or 'model_data'}.csv", table.to_csv(index=False)
+                )
+        if chart_payloads:
+            index_rows: List[Dict[str, str]] = []
+            for chart_name, payload in chart_payloads.items():
+                safe_name = re.sub(r"[^a-z0-9]+", "_", chart_name.lower()).strip("_")
+                data_frame = payload.get("data")
+                if isinstance(data_frame, pd.DataFrame):
+                    archive.writestr(
+                        f"charts/{safe_name or 'chart'}_data.csv",
+                        data_frame.to_csv(index=False),
+                    )
+                spec = payload.get("spec")
+                if spec:
+                    archive.writestr(
+                        f"charts/{safe_name or 'chart'}_spec.json",
+                        json.dumps(spec, indent=2),
+                    )
+                index_rows.append(
+                    {
+                        "chart": chart_name,
+                        "data_file": f"charts/{safe_name or 'chart'}_data.csv",
+                        "spec_file": f"charts/{safe_name or 'chart'}_spec.json",
+                    }
+                )
+            if index_rows:
+                archive.writestr(
+                    "charts/index.csv", pd.DataFrame(index_rows).to_csv(index=False)
+                )
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def _generate_business_plan_docx_bytes(
@@ -3551,7 +3616,29 @@ def main() -> None:
                         chart_payloads=chart_payloads,
                     )
                 except RuntimeError as exc:
-                    st.warning(str(exc))
+                    if "Missing Excel writer dependency" in str(exc):
+                        plan_csv_zip_bytes = _generate_business_plan_csv_zip_bytes(
+                            selected_scenario,
+                            plan_markdown,
+                            investor_recommendations,
+                            scorecard_df,
+                            confidence_df,
+                            citation_entries,
+                            financial_tables=business_plan_tables,
+                            chart_payloads=chart_payloads,
+                        )
+                        st.warning(
+                            "Excel writer dependencies are unavailable. Downloading CSV ZIP export instead."
+                        )
+                        st.download_button(
+                            "Download Business Plan CSV ZIP (.zip)",
+                            data=plan_csv_zip_bytes,
+                            file_name=f"Business_Plan_{selected_scenario.replace(' ', '_')}_CSV_Export.zip",
+                            mime="application/zip",
+                            key=f"download_business_plan_csv_zip_{selected_scenario}",
+                        )
+                    else:
+                        st.warning(str(exc))
                 else:
                     st.download_button(
                         "Download Excel (.xlsx)",

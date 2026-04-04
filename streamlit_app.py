@@ -975,13 +975,39 @@ def _extract_text_from_upload(uploaded_file: Any) -> str:
         return file_bytes.decode("utf-8", errors="ignore")
 
     if suffix == "pdf":
+        reader_cls = None
         try:
-            from pypdf import PdfReader  # type: ignore
+            from pypdf import PdfReader as _PdfReader  # type: ignore
+
+            reader_cls = _PdfReader
         except ImportError:
-            return ""
-        reader = PdfReader(BytesIO(file_bytes))
-        pages = [page.extract_text() or "" for page in reader.pages]
-        return "\n".join(pages)
+            try:
+                from PyPDF2 import PdfReader as _PdfReader  # type: ignore
+
+                reader_cls = _PdfReader
+            except ImportError:
+                reader_cls = None
+        if reader_cls is not None:
+            try:
+                reader = reader_cls(BytesIO(file_bytes))
+                pages = [page.extract_text() or "" for page in reader.pages]
+                extracted = "\n".join(pages).strip()
+                if extracted:
+                    return extracted
+            except Exception:
+                pass
+
+        try:
+            import pdfplumber  # type: ignore
+
+            with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+                pages = [(page.extract_text() or "") for page in pdf.pages]
+            extracted = "\n".join(pages).strip()
+            if extracted:
+                return extracted
+        except Exception:
+            pass
+        return ""
 
     if suffix == "docx":
         try:

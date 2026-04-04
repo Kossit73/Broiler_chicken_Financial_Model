@@ -46,6 +46,45 @@ from broiler_model.production import summarise_revenue_totals
 DEFAULT_CUSTOM_SIMULATION_DEFINITIONS = load_custom_simulation_definitions()
 DEFAULT_MONTE_CARLO_DISTRIBUTIONS = load_monte_carlo_distributions()
 
+RAG_DOCUMENT_TYPE_CONFIG: Dict[str, Dict[str, Any]] = {
+    "pdf": {
+        "extensions": {"pdf"},
+        "pipeline": ["pypdf/PyPDF2", "pdfplumber", "PyMuPDF", "pdfminer", "pdftotext", "OCR"],
+    },
+    "word": {
+        "extensions": {"docx"},
+        "pipeline": ["python-docx", "docx-zipxml"],
+    },
+    "excel": {
+        "extensions": {"xlsx", "xlsm", "xltx", "xltm", "xls"},
+        "pipeline": ["openpyxl/pandas", "xlsx-zipxml"],
+    },
+    "delimited": {
+        "extensions": {"csv", "tsv"},
+        "pipeline": ["utf-8 delimited parser"],
+    },
+    "json": {
+        "extensions": {"json"},
+        "pipeline": ["json parser"],
+    },
+    "markup": {
+        "extensions": {"html", "htm", "xml"},
+        "pipeline": ["tag-strip text extraction"],
+    },
+    "pptx": {
+        "extensions": {"pptx"},
+        "pipeline": ["python-pptx", "pptx-zipxml"],
+    },
+    "text": {
+        "extensions": {"txt", "md", "log"},
+        "pipeline": ["plain text"],
+    },
+    "archive": {
+        "extensions": {"zip"},
+        "pipeline": ["zip expansion into supported files"],
+    },
+}
+
 
 ROW_REMOVAL_COLUMN = "Remove row"
 ROW_EDIT_COLUMN = "Edit row"
@@ -93,6 +132,27 @@ def _tokenize_text(text: str) -> List[str]:
     """Tokenize text into lowercase alphanumeric terms."""
 
     return [token for token in re.findall(r"[a-z0-9]+", (text or "").lower()) if token]
+
+
+def _rag_supported_extensions(include_archives: bool = True) -> List[str]:
+    """Return sorted list of supported RAG upload extensions."""
+
+    supported: List[str] = []
+    for doc_type, config in RAG_DOCUMENT_TYPE_CONFIG.items():
+        if not include_archives and doc_type == "archive":
+            continue
+        supported.extend(sorted(config.get("extensions", [])))
+    return sorted(set(supported))
+
+
+def _resolve_rag_document_type(suffix: str) -> str:
+    """Map a file suffix to configured RAG document type."""
+
+    suffix = (suffix or "").lower().strip(".")
+    for doc_type, config in RAG_DOCUMENT_TYPE_CONFIG.items():
+        if suffix in config.get("extensions", set()):
+            return doc_type
+    return "unknown"
 
 
 def _records_match(left: Iterable[Dict[str, Any]], right: Iterable[Dict[str, Any]]) -> bool:
@@ -1057,11 +1117,12 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
     file_name = getattr(uploaded_file, "name", "document")
     suffix = file_name.lower().split(".")[-1] if "." in file_name else ""
     file_bytes = uploaded_file.getvalue()
+    doc_type = _resolve_rag_document_type(suffix)
 
-    if suffix in {"txt", "md", "log"}:
+    if doc_type == "text":
         return file_bytes.decode("utf-8", errors="ignore"), "plain-text", None
 
-    if suffix in {"csv", "tsv"}:
+    if doc_type == "delimited":
         delimiter = "\t" if suffix == "tsv" else ","
         try:
             decoded = file_bytes.decode("utf-8", errors="ignore")
@@ -1072,20 +1133,20 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
         except Exception as exc:
             return "", "delimited", str(exc)
 
-    if suffix in {"json"}:
+    if doc_type == "json":
         try:
             obj = json.loads(file_bytes.decode("utf-8", errors="ignore"))
             return json.dumps(obj, indent=2), "json", None
         except Exception as exc:
             return "", "json", str(exc)
 
-    if suffix in {"html", "htm", "xml"}:
+    if doc_type == "markup":
         text = file_bytes.decode("utf-8", errors="ignore")
         cleaned = re.sub(r"<[^>]+>", " ", text)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned, "markup-strip", None
 
-    if suffix == "pdf":
+    if doc_type == "pdf":
         reader_cls = None
         try:
             from pypdf import PdfReader as _PdfReader  # type: ignore
@@ -1194,7 +1255,7 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
             "(pypdf/PyPDF2/pdfplumber/PyMuPDF/pdfminer/pdftotext; OCR requires tesseract + pdf2image or PyMuPDF+Pillow+pytesseract)."
         )
 
-    if suffix == "docx":
+    if doc_type == "word":
         try:
             from docx import Document  # type: ignore
         except ImportError:
@@ -1220,7 +1281,7 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
             return "", "docx", str(exc)
         return "", "docx", "Could not extract text from DOCX"
 
-    if suffix in {"xlsx", "xlsm", "xltx", "xltm"}:
+    if doc_type == "excel" and suffix in {"xlsx", "xlsm", "xltx", "xltm"}:
         try:
             from openpyxl import load_workbook  # type: ignore
 
@@ -1247,7 +1308,7 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
             pass
         return "", "xlsx", openpyxl_error or "Could not extract text from XLSX"
 
-    if suffix == "xls":
+    if doc_type == "excel" and suffix == "xls":
         try:
             import pandas as _pd  # type: ignore
 
@@ -1266,7 +1327,7 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
             return "", "xls", str(exc)
         return "", "xls", "Could not extract text from XLS"
 
-    if suffix == "pptx":
+    if doc_type == "pptx":
         try:
             from pptx import Presentation  # type: ignore
 
@@ -1303,12 +1364,13 @@ def _expand_uploaded_documents(uploaded_docs: Optional[List[Any]]) -> List[Dict[
     """Expand uploaded files, including ZIP archives, into parseable payloads."""
 
     expanded: List[Dict[str, Any]] = []
+    supported_suffixes = set(_rag_supported_extensions(include_archives=False))
     for uploaded in uploaded_docs or []:
         name = getattr(uploaded, "name", "document")
         file_bytes = uploaded.getvalue()
         suffix = name.lower().split(".")[-1] if "." in name else ""
         if suffix != "zip":
-            expanded.append({"name": name, "payload": file_bytes})
+            expanded.append({"name": name, "payload": file_bytes, "supported": suffix in supported_suffixes})
             continue
         try:
             with zipfile.ZipFile(BytesIO(file_bytes)) as archive:
@@ -1318,14 +1380,16 @@ def _expand_uploaded_documents(uploaded_docs: Optional[List[Any]]) -> List[Dict[
                     if not m.endswith("/") and not m.startswith("__MACOSX/")
                 ]
                 for member in members:
+                    member_suffix = member.lower().split(".")[-1] if "." in member else ""
                     expanded.append(
                         {
                             "name": f"{name}:{member}",
                             "payload": archive.read(member),
+                            "supported": member_suffix in supported_suffixes,
                         }
                     )
         except Exception:
-            expanded.append({"name": name, "payload": file_bytes})
+            expanded.append({"name": name, "payload": file_bytes, "supported": False})
     return expanded
 
 
@@ -4110,9 +4174,12 @@ def main() -> None:
         st.caption(
             "Upload research papers/documents to ground business-plan rewrites with evidence."
         )
+        st.caption(
+            "Supported indexing formats: PDF, Word, Excel, CSV/TSV, JSON, HTML/XML, PPTX, TXT/MD/LOG, and ZIP bundles."
+        )
         uploaded_docs = st.file_uploader(
             "Upload research documents",
-            type=["pdf", "docx", "txt", "md", "csv", "tsv", "xlsx", "xlsm", "xls", "json", "html", "xml", "pptx", "zip"],
+            type=_rag_supported_extensions(include_archives=True),
             accept_multiple_files=True,
             key=f"rag_upload_{selected_scenario}",
         )
@@ -4129,6 +4196,19 @@ def main() -> None:
             for upload_entry in expanded_uploads:
                 file_name = upload_entry["name"]
                 payload = upload_entry["payload"]
+                if not upload_entry.get("supported", True):
+                    parse_diagnostics.append(
+                        {
+                            "File": file_name,
+                            "Type": file_name.split(".")[-1].lower() if "." in file_name else "",
+                            "Parser": "n/a",
+                            "Characters": 0,
+                            "Chunks": 0,
+                            "Status": "Skipped",
+                            "Error": "Unsupported extension for RAG indexing configuration.",
+                        }
+                    )
+                    continue
                 extracted, parser_used, parse_error = _extract_text_from_payload(file_name, payload)
                 if not extracted.strip():
                     st.warning(

@@ -11,8 +11,6 @@ from io import BytesIO
 import json
 import math
 import re
-from urllib.parse import quote_plus
-from urllib.request import urlopen
 from xml.etree import ElementTree as ET
 import zipfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple, get_type_hints
@@ -1845,34 +1843,14 @@ def _run_true_deterministic_sensitivity(
     }
 
 
-def _fetch_web_benchmarks(question: str) -> List[str]:
-    """Fetch lightweight web benchmark snippets."""
-
-    notes: List[str] = []
-    try:
-        query = quote_plus(f"broiler poultry financial benchmark {question}")
-        ddg_url = f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1&no_redirect=1"
-        with urlopen(ddg_url, timeout=4) as response:  # nosec B310
-            payload = json.loads(response.read().decode("utf-8"))
-        abstract = (payload.get("AbstractText") or "").strip()
-        heading = (payload.get("Heading") or "DuckDuckGo").strip()
-        if abstract:
-            notes.append(f"{heading}: {abstract[:220]}...")
-    except Exception:
-        pass
-    return notes
-
-
 def _answer_model_question(
     question: str,
     context_frames: Dict[str, pd.DataFrame],
     assumptions: Assumptions,
     valuation: Dict[str, Any],
     rag_chunks: Optional[List[Dict[str, Any]]] = None,
-    use_web_search: bool = False,
-    investor_memo_mode: bool = False,
 ) -> str:
-    """Return an analyst-style memo answer grounded in model evidence."""
+    """Return a direct answer grounded only in model outputs."""
 
     q = (question or "").strip()
     if not q:
@@ -1897,36 +1875,19 @@ def _answer_model_question(
             f"Please review inputs/results first: {issues_text}"
         )
 
-    recommendation = "Proceed with caution"
-    if kpis.get("npv", 0) > 0 and kpis.get("avg_dscr", 0) >= 1.3:
-        recommendation = "Investment case is attractive"
-    elif kpis.get("npv", 0) <= 0 or kpis.get("min_dscr", 9) < 1.0:
-        recommendation = "Investment case is weak unless assumptions improve"
-
-    risks = [
-        "Revenue downside from price/mortality shocks",
-        "Debt-service stress if DSCR weakens below covenant comfort",
-    ]
-    mitigations = [
-        "Tighten feed and mortality controls with monthly KPI governance",
-        "Stage capex and maintain liquidity buffer to absorb downside cycles",
-    ]
-
     parts = [
-        f"**Intent classification:** {intent.replace('_', ' ').title()}",
-        "### Executive takeaway",
-        recommendation,
-        "### Deterministic KPI snapshot",
-        f"- NPV: {kpis.get('npv', float('nan')):,.0f}" if "npv" in kpis else "- NPV: N/A",
-        f"- IRR: {kpis.get('irr', float('nan')):.2%}" if "irr" in kpis else "- IRR: N/A",
-        f"- Avg DSCR: {kpis.get('avg_dscr', float('nan')):.2f}" if "avg_dscr" in kpis else "- Avg DSCR: N/A",
-        f"- Min DSCR: {kpis.get('min_dscr', float('nan')):.2f}" if "min_dscr" in kpis else "- Min DSCR: N/A",
-        f"- Latest FCF: {kpis.get('latest_fcf', float('nan')):,.0f}" if "latest_fcf" in kpis else "- Latest FCF: N/A",
-        "### Sensitivity proxy (deterministic)",
+        "Direct answer from current model outputs:",
+        f"- NPV: {kpis.get('npv', float('nan')):,.0f}" if "npv" in kpis else "- NPV: N/A in current outputs",
+        f"- IRR: {kpis.get('irr', float('nan')):.2%}" if "irr" in kpis else "- IRR: N/A in current outputs",
+        f"- Avg DSCR: {kpis.get('avg_dscr', float('nan')):.2f}" if "avg_dscr" in kpis else "- Avg DSCR: N/A in current outputs",
+        f"- Min DSCR: {kpis.get('min_dscr', float('nan')):.2f}" if "min_dscr" in kpis else "- Min DSCR: N/A in current outputs",
+        f"- Latest FCF: {kpis.get('latest_fcf', float('nan')):,.0f}" if "latest_fcf" in kpis else "- Latest FCF: N/A in current outputs",
         f"- NPV if price -5%: {sensitivity['price_minus_5pct_npv']:,.0f}",
         f"- NPV if price +5%: {sensitivity['price_plus_5pct_npv']:,.0f}",
         f"- NPV if costs +5%: {sensitivity['cost_plus_5pct_npv']:,.0f}",
-        f"- Confidence score: {confidence_score:.2f}",
+        "",
+        "I only used model tables/results available in this scenario (no web or external assumptions).",
+        f"Matched intent: {intent.replace('_', ' ').title()} | Confidence score: {confidence_score:.2f}",
     ]
 
     if evidence_rows:
@@ -1935,42 +1896,7 @@ def _answer_model_question(
             parts.append(f"- {item['citation']} {item['row_text']}")
 
     if rag_chunks:
-        rag_hits = _retrieve_relevant_chunks(rag_chunks, q, top_k=2)
-        if rag_hits:
-            parts.append("### RAG corroboration")
-            for hit in rag_hits:
-                parts.append(
-                    f"- {hit.get('source')} ({hit.get('chunk_id')}): {hit.get('snippet')[:180]}..."
-                )
-
-    if use_web_search:
-        web_notes = _fetch_web_benchmarks(q)
-        parts.append("### External benchmark comparison")
-        if web_notes:
-            parts.extend([f"- {note}" for note in web_notes])
-        else:
-            parts.append("- No web benchmark snippet was retrieved.")
-
-    parts.append("### Risks and mitigations")
-    parts.extend([f"- Risk: {risk}" for risk in risks])
-    parts.extend([f"- Mitigation: {mitigation}" for mitigation in mitigations])
-
-    if investor_memo_mode:
-        parts.insert(
-            1,
-            (
-                "This memo frames the scenario for an investor audience: it focuses on valuation quality, "
-                "debt-service resilience, downside sensitivity, and execution safeguards."
-            ),
-        )
-        if intent == "debt_capacity":
-            parts.insert(2, "Debt-capacity focus: assess covenant headroom and refinancing resilience.")
-        elif intent == "risk":
-            parts.insert(2, "Risk focus: evaluate downside tail outcomes and mitigation readiness.")
-        elif intent == "operational_kpi":
-            parts.insert(2, "Operational focus: connect throughput, pricing, and cost controls to value creation.")
-        elif intent == "fundraising_narrative":
-            parts.insert(2, "Fundraising focus: articulate investability, execution plan, and downside protection.")
+        parts.append("Note: RAG documents are ignored in Model Q&A to avoid non-model claims.")
 
     return "\n".join(parts)
 
@@ -4134,17 +4060,7 @@ def main() -> None:
 
         st.markdown("### Model Q&A chatbox")
         st.caption(
-            "Ask questions about assumptions, valuation, statements, cash flow, and risk metrics."
-        )
-        use_web_search = st.checkbox(
-            "Use web search for benchmark comparison",
-            value=False,
-            key=f"use_web_search_{selected_scenario}",
-        )
-        investor_memo_mode = st.checkbox(
-            "Investor memo mode (deep analytical prose)",
-            value=True,
-            key=f"investor_memo_mode_{selected_scenario}",
+            "Ask a question and get an answer strictly from this scenario's model outputs."
         )
         chat_history_key = f"model_chat_history_{selected_scenario}"
         chat_history = st.session_state.setdefault(chat_history_key, [])
@@ -4192,8 +4108,6 @@ def main() -> None:
                 assumptions,
                 valuation,
                 rag_chunks,
-                use_web_search=use_web_search,
-                investor_memo_mode=investor_memo_mode,
             )
             chat_history.append({"role": "assistant", "content": answer})
             st.session_state[chat_history_key] = chat_history

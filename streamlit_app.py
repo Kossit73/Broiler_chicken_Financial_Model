@@ -2894,6 +2894,21 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
         values,
         columns=3,
     )
+    survivors_per_cycle = float(values.get("birds_per_cycle", defaults.birds_per_cycle)) * (
+        1 - float(values.get("mortality_rate", defaults.mortality_rate))
+    )
+    estimated_egg_dozens_per_cycle = max(survivors_per_cycle * 0.06, 0.0)
+    estimated_eggs_per_cycle = estimated_egg_dozens_per_cycle * 12.0
+    egg_info_col1, egg_info_col2 = st.columns(2)
+    egg_info_col1.metric(
+        "Eggs price per dozen (selected)",
+        f"${float(values.get('eggs_price_per_dozen', defaults.eggs_price_per_dozen)):.2f}",
+    )
+    egg_info_col2.metric(
+        "Estimated eggs per cycle",
+        f"{estimated_eggs_per_cycle:,.0f} eggs",
+        help="Derived from surviving birds and the default egg-yield factor used by the revenue template.",
+    )
 
     _render_input_section(
         "Operating costs",

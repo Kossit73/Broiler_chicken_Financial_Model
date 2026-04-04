@@ -128,6 +128,19 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
+
+
+def _decode_bytes_to_text(data: bytes) -> str:
+    """Decode byte payloads with lightweight encoding fallbacks."""
+
+    for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="ignore")
+
+
 def _tokenize_text(text: str) -> List[str]:
     """Tokenize text into lowercase alphanumeric terms."""
 
@@ -1120,12 +1133,12 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
     doc_type = _resolve_rag_document_type(suffix)
 
     if doc_type == "text":
-        return file_bytes.decode("utf-8", errors="ignore"), "plain-text", None
+        return _decode_bytes_to_text(file_bytes), "plain-text", None
 
     if doc_type == "delimited":
         delimiter = "\t" if suffix == "tsv" else ","
         try:
-            decoded = file_bytes.decode("utf-8", errors="ignore")
+            decoded = _decode_bytes_to_text(file_bytes)
             lines = decoded.splitlines()
             if not lines:
                 return "", "csv", "File is empty"
@@ -1135,13 +1148,13 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
 
     if doc_type == "json":
         try:
-            obj = json.loads(file_bytes.decode("utf-8", errors="ignore"))
+            obj = json.loads(_decode_bytes_to_text(file_bytes))
             return json.dumps(obj, indent=2), "json", None
         except Exception as exc:
             return "", "json", str(exc)
 
     if doc_type == "markup":
-        text = file_bytes.decode("utf-8", errors="ignore")
+        text = _decode_bytes_to_text(file_bytes)
         cleaned = re.sub(r"<[^>]+>", " ", text)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned, "markup-strip", None
@@ -1214,7 +1227,7 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
                         text=True,
                     )
                     out_file.seek(0)
-                    extracted = out_file.read().decode("utf-8", errors="ignore").strip()
+                    extracted = _decode_bytes_to_text(out_file.read()).strip()
                     if extracted:
                         return extracted, "pdftotext", None
             except Exception:
@@ -1354,7 +1367,7 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
             pass
         return "", "pptx", pptx_error or "Could not extract text from PPTX"
 
-    fallback = file_bytes.decode("utf-8", errors="ignore").strip()
+    fallback = _decode_bytes_to_text(file_bytes).strip()
     if fallback:
         return fallback, "fallback-utf8", None
     return "", "unknown", "Unsupported or binary file format with no text parser available."

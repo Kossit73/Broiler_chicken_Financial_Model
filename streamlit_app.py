@@ -11,6 +11,9 @@ from io import BytesIO
 import json
 import math
 import re
+import shutil
+import subprocess
+import tempfile
 from xml.etree import ElementTree as ET
 import zipfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple, get_type_hints
@@ -1115,7 +1118,47 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
                 return extracted, "pdfplumber", None
         except Exception:
             pass
-        return "", "pdf", "No PDF parser could extract text (pypdf/PyPDF2/pdfplumber)."
+
+        try:
+            import fitz  # type: ignore
+
+            document = fitz.open(stream=file_bytes, filetype="pdf")
+            pages = [page.get_text("text") or "" for page in document]
+            extracted = "\n".join(pages).strip()
+            if extracted:
+                return extracted, "pymupdf", None
+        except Exception:
+            pass
+
+        try:
+            from pdfminer.high_level import extract_text as _pdfminer_extract_text  # type: ignore
+
+            extracted = (_pdfminer_extract_text(BytesIO(file_bytes)) or "").strip()
+            if extracted:
+                return extracted, "pdfminer.six", None
+        except Exception:
+            pass
+
+        if shutil.which("pdftotext"):
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".pdf") as src_file, tempfile.NamedTemporaryFile(
+                    suffix=".txt"
+                ) as out_file:
+                    src_file.write(file_bytes)
+                    src_file.flush()
+                    subprocess.run(
+                        ["pdftotext", "-layout", src_file.name, out_file.name],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    out_file.seek(0)
+                    extracted = out_file.read().decode("utf-8", errors="ignore").strip()
+                    if extracted:
+                        return extracted, "pdftotext", None
+            except Exception:
+                pass
+        return "", "pdf", "No PDF parser could extract text (pypdf/PyPDF2/pdfplumber/PyMuPDF/pdfminer/pdftotext)."
 
     if suffix == "docx":
         try:
@@ -1220,6 +1263,50 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
     if fallback:
         return fallback, "fallback-utf8", None
     return "", "unknown", "Unsupported or binary file format with no text parser available."
+
+
+def _expand_uploaded_documents(uploaded_docs: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    """Expand uploaded files, including ZIP archives, into parseable payloads."""
+
+    expanded: List[Dict[str, Any]] = []
+    for uploaded in uploaded_docs or []:
+        name = getattr(uploaded, "name", "document")
+        file_bytes = uploaded.getvalue()
+        suffix = name.lower().split(".")[-1] if "." in name else ""
+        if suffix != "zip":
+            expanded.append({"name": name, "payload": file_bytes})
+            continue
+        try:
+            with zipfile.ZipFile(BytesIO(file_bytes)) as archive:
+                members = [
+                    m
+                    for m in archive.namelist()
+                    if not m.endswith("/") and not m.startswith("__MACOSX/")
+                ]
+                for member in members:
+                    expanded.append(
+                        {
+                            "name": f"{name}:{member}",
+                            "payload": archive.read(member),
+                        }
+                    )
+        except Exception:
+            expanded.append({"name": name, "payload": file_bytes})
+    return expanded
+
+
+def _extract_text_from_payload(file_name: str, payload: bytes) -> Tuple[str, str, Optional[str]]:
+    """Parse text from a raw file payload by adapting to upload parser interface."""
+
+    class _UploadedPayload:
+        def __init__(self, name: str, data: bytes) -> None:
+            self.name = name
+            self._data = data
+
+        def getvalue(self) -> bytes:
+            return self._data
+
+    return _extract_text_from_upload(_UploadedPayload(file_name, payload))
 
 
 def _chunk_document_text(
@@ -3991,7 +4078,7 @@ def main() -> None:
         )
         uploaded_docs = st.file_uploader(
             "Upload research documents",
-            type=["pdf", "docx", "txt", "md", "csv", "tsv", "xlsx", "xlsm", "xls", "json", "html", "xml", "pptx"],
+            type=["pdf", "docx", "txt", "md", "csv", "tsv", "xlsx", "xlsm", "xls", "json", "html", "xml", "pptx", "zip"],
             accept_multiple_files=True,
             key=f"rag_upload_{selected_scenario}",
         )
@@ -4004,18 +4091,21 @@ def main() -> None:
             documents: List[Dict[str, Any]] = []
             all_chunks: List[Dict[str, Any]] = []
             parse_diagnostics: List[Dict[str, Any]] = []
-            for uploaded in uploaded_docs or []:
-                extracted, parser_used, parse_error = _extract_text_from_upload(uploaded)
+            expanded_uploads = _expand_uploaded_documents(uploaded_docs)
+            for upload_entry in expanded_uploads:
+                file_name = upload_entry["name"]
+                payload = upload_entry["payload"]
+                extracted, parser_used, parse_error = _extract_text_from_payload(file_name, payload)
                 if not extracted.strip():
                     st.warning(
-                        f"Could not parse text for `{uploaded.name}`. "
+                        f"Could not parse text for `{file_name}`. "
                         f"Parser: {parser_used}. "
                         f"{parse_error or 'Install optional parser dependencies for this format if needed.'}"
                     )
                     parse_diagnostics.append(
                         {
-                            "File": uploaded.name,
-                            "Type": uploaded.name.split(".")[-1].lower() if "." in uploaded.name else "",
+                            "File": file_name,
+                            "Type": file_name.split(".")[-1].lower() if "." in file_name else "",
                             "Parser": parser_used,
                             "Characters": 0,
                             "Chunks": 0,
@@ -4025,16 +4115,16 @@ def main() -> None:
                     )
                     continue
                 doc_record = {
-                    "name": uploaded.name,
+                    "name": file_name,
                     "char_count": len(extracted),
                 }
                 documents.append(doc_record)
-                new_chunks = _chunk_document_text(uploaded.name, extracted)
+                new_chunks = _chunk_document_text(file_name, extracted)
                 all_chunks.extend(new_chunks)
                 parse_diagnostics.append(
                     {
-                        "File": uploaded.name,
-                        "Type": uploaded.name.split(".")[-1].lower() if "." in uploaded.name else "",
+                        "File": file_name,
+                        "Type": file_name.split(".")[-1].lower() if "." in file_name else "",
                         "Parser": parser_used,
                         "Characters": len(extracted),
                         "Chunks": len(new_chunks),

@@ -1419,6 +1419,113 @@ def _ai_settings_to_payload(settings: Dict[str, Any], payload: Dict[str, Any]) -
     payload["ai_settings"] = settings
 
 
+def _answer_model_question(
+    question: str,
+    assumptions: Assumptions,
+    valuation: Dict[str, Any],
+    annual_df: pd.DataFrame,
+    cashflow_df: pd.DataFrame,
+    dscr_df: pd.DataFrame,
+    break_even_df: pd.DataFrame,
+    scorecard_df: pd.DataFrame,
+    rag_chunks: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Return a model-grounded answer for a user question in the AI tab chatbox."""
+
+    q = (question or "").strip()
+    if not q:
+        return "Please enter a question about the model outputs."
+
+    q_lower = q.lower()
+    npv = valuation.get("npv")
+    irr = valuation.get("irr")
+
+    annual_revenue = None
+    if not annual_df.empty and "total_revenue" in annual_df.columns:
+        annual_revenue = pd.to_numeric(annual_df["total_revenue"], errors="coerce").dropna()
+    avg_revenue = (
+        float(annual_revenue.mean())
+        if annual_revenue is not None and not annual_revenue.empty
+        else None
+    )
+
+    avg_dscr = None
+    if not dscr_df.empty and "dscr" in dscr_df.columns:
+        dscr_values = pd.to_numeric(dscr_df["dscr"], errors="coerce").dropna()
+        if not dscr_values.empty:
+            avg_dscr = float(dscr_values.mean())
+
+    latest_fcf = None
+    if not cashflow_df.empty and "free_cash_flow" in cashflow_df.columns:
+        fcf_values = pd.to_numeric(cashflow_df["free_cash_flow"], errors="coerce").dropna()
+        if not fcf_values.empty:
+            latest_fcf = float(fcf_values.iloc[-1])
+
+    break_even_price = None
+    if not break_even_df.empty and "break_even_live_price_per_kg" in break_even_df.columns:
+        be_values = pd.to_numeric(
+            break_even_df["break_even_live_price_per_kg"], errors="coerce"
+        ).dropna()
+        if not be_values.empty:
+            break_even_price = float(be_values.iloc[-1])
+
+    if any(token in q_lower for token in ["npv", "irr", "valuation", "return"]):
+        return (
+            f"Valuation snapshot: NPV is {npv:,.0f} USD and IRR is {irr:.2%}. "
+            f"Average annual revenue is {avg_revenue:,.0f} USD."
+            if npv is not None and irr is not None and avg_revenue is not None
+            else "I could not compute complete valuation metrics from the current outputs."
+        )
+    if any(token in q_lower for token in ["dscr", "debt", "coverage"]):
+        return (
+            f"Debt-service view: average DSCR is {avg_dscr:.2f}. "
+            f"Latest projected free cash flow is {latest_fcf:,.0f} USD."
+            if avg_dscr is not None and latest_fcf is not None
+            else "I could not derive DSCR/cash-flow metrics from the current tables."
+        )
+    if any(token in q_lower for token in ["break-even", "breakeven", "price"]):
+        if break_even_price is None:
+            return "Break-even live price is not available in the current scenario outputs."
+        buffer_to_live = assumptions.live_price_per_kg - break_even_price
+        return (
+            f"Break-even live price is {break_even_price:.2f} per kg. "
+            f"Current live price is {assumptions.live_price_per_kg:.2f} per kg, "
+            f"so the buffer is {buffer_to_live:.2f} per kg."
+        )
+    if any(token in q_lower for token in ["assumption", "input", "parameter"]):
+        return (
+            "Key assumptions include "
+            f"{assumptions.birds_per_cycle:,.0f} birds/cycle, "
+            f"{assumptions.cycles_per_year} cycles/year, "
+            f"FCR {assumptions.feed_conversion_ratio:.2f}, "
+            f"mortality {assumptions.mortality_rate:.2%}, "
+            f"and live price {assumptions.live_price_per_kg:.2f}/kg."
+        )
+
+    if rag_chunks:
+        evidence = _retrieve_relevant_chunks(rag_chunks, q, top_k=2)
+        if evidence:
+            lead = evidence[0]
+            return (
+                "I found relevant evidence in your RAG library. "
+                f"Top source: {lead.get('source')} (chunk {lead.get('chunk_id')}). "
+                "You can use 'Rewrite using RAG evidence' to inject citations into the business plan."
+            )
+
+    top_signals: List[str] = []
+    if not scorecard_df.empty:
+        for _, row in scorecard_df.head(3).iterrows():
+            top_signals.append(
+                f"{row.get('Metric')}: {row.get('Status')} ({row.get('Value')})"
+            )
+    signals_text = "; ".join(top_signals) if top_signals else "No scorecard signals available."
+    return (
+        "I can answer questions about valuation, DSCR/debt-service, break-even pricing, "
+        "assumptions, and RAG evidence. "
+        f"Current quick signals: {signals_text}"
+    )
+
+
 def _rerun() -> None:
     """Trigger a Streamlit rerun."""
 
@@ -3411,6 +3518,37 @@ def main() -> None:
         rag_docs = rag_store.get(selected_scenario, {}).get("documents", [])
         rag_chunks = rag_store.get(selected_scenario, {}).get("chunks", [])
         st.write(f"Indexed documents: **{len(rag_docs)}** | Chunks: **{len(rag_chunks)}**")
+
+        st.markdown("### Model Q&A chatbox")
+        st.caption(
+            "Ask questions about assumptions, valuation, statements, cash flow, and risk metrics."
+        )
+        chat_history_key = f"model_chat_history_{selected_scenario}"
+        chat_history = st.session_state.setdefault(chat_history_key, [])
+        for message in chat_history:
+            with st.chat_message(message.get("role", "assistant")):
+                st.markdown(message.get("content", ""))
+
+        prompt = st.chat_input(
+            "Ask a question about this model scenario...",
+            key=f"model_chat_input_{selected_scenario}",
+        )
+        if prompt:
+            chat_history.append({"role": "user", "content": prompt})
+            answer = _answer_model_question(
+                prompt,
+                assumptions,
+                valuation,
+                annual_df,
+                cashflow_df,
+                dscr_df,
+                break_even_df,
+                scorecard_df,
+                rag_chunks,
+            )
+            chat_history.append({"role": "assistant", "content": answer})
+            st.session_state[chat_history_key] = chat_history
+            _rerun()
 
         st.divider()
         st.subheader("Business Plan Agent")

@@ -65,6 +65,12 @@ def _to_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
+def _tokenize_text(text: str) -> List[str]:
+    """Tokenize text into lowercase alphanumeric terms."""
+
+    return [token for token in re.findall(r"[a-z0-9]+", (text or "").lower()) if token]
+
+
 def _records_match(left: Iterable[Dict[str, Any]], right: Iterable[Dict[str, Any]]) -> bool:
     """Return ``True`` when two iterable collections of mapping-like rows match."""
 

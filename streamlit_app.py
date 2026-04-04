@@ -2124,6 +2124,33 @@ def _ensure_scenario_payload(
     return model, results
 
 
+def _normalize_scenario_payload(payload: Any) -> Dict[str, Any]:
+    """Normalize persisted scenario payloads from older/newer app versions."""
+
+    normalized: Dict[str, Any] = payload if isinstance(payload, dict) else {}
+    assumptions_payload = normalized.get("assumptions", {})
+    ai_payload = normalized.get("ai_settings", {})
+    benchmark_payload = normalized.get("investor_benchmarks", {})
+
+    if not isinstance(assumptions_payload, dict):
+        assumptions_payload = {}
+    if not isinstance(ai_payload, dict):
+        ai_payload = {}
+    if not isinstance(benchmark_payload, dict):
+        benchmark_payload = {}
+
+    normalized["assumptions"] = assumptions_payload
+    normalized["ai_settings"] = {
+        **DEFAULT_AI_SETTINGS,
+        **{k: v for k, v in ai_payload.items() if v is not None},
+    }
+    normalized["investor_benchmarks"] = {
+        **DEFAULT_INVESTOR_BENCHMARKS,
+        **{k: v for k, v in benchmark_payload.items() if v is not None},
+    }
+    return normalized
+
+
 def _generate_excel_bytes(
     model: ScenarioModel, results: Dict[str, Any], scenario: str
 ) -> bytes:
@@ -3689,10 +3716,10 @@ def main() -> None:
             "ai_settings": DEFAULT_AI_SETTINGS.copy(),
             "investor_benchmarks": DEFAULT_INVESTOR_BENCHMARKS.copy(),
         }
-    payload = scenario_store[selected_scenario]
-    payload.setdefault("investor_benchmarks", DEFAULT_INVESTOR_BENCHMARKS.copy())
+    payload = _normalize_scenario_payload(scenario_store.get(selected_scenario))
+    scenario_store[selected_scenario] = payload
 
-    defaults = Assumptions(**payload.get("assumptions", {}))
+    defaults = Assumptions(**payload["assumptions"])
 
     (
         input_tab,

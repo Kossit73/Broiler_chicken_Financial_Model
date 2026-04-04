@@ -3096,6 +3096,7 @@ def main() -> None:
     cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])
     annual_summary_obj = results["annual"]
     annual_df = pd.DataFrame([asdict(annual_summary_obj)])
+    valuation_df = pd.DataFrame([valuation])
     cashflow_df = pd.DataFrame([asdict(row) for row in results["cashflows"]])
     cashflow_bridge_frames = _prepare_cashflow_bridge_frames(cashflow_df)
     income_df = pd.DataFrame([asdict(row) for row in financials["income_statement"]])
@@ -3670,7 +3671,7 @@ def main() -> None:
                     "Valuation Analysis": valuation_df,
                     "Income Statement": income_df,
                     "Statement of Financial Position": balance_df,
-                    "Cash Flow Statement": statement_cf_df,
+                    "Cash Flow Statement": cash_statement_df,
                     "Debt Schedule": loan_df,
                     "Revenue Summary by Year": annual_totals_df,
                     "Revenue Summary by Category": summary_by_category,

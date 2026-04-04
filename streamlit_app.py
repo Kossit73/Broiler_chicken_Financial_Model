@@ -66,6 +66,27 @@ def _to_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
+def _to_float(value: Any) -> Optional[float]:
+    """Return float when value is numeric-like, otherwise ``None``."""
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _tokenize_text(text: str) -> List[str]:
     """Tokenize text into lowercase alphanumeric terms."""
 

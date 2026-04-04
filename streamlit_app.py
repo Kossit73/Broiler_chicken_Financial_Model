@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import copy
 from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timezone
+from html import escape as xml_escape
+import hashlib
 from io import BytesIO
 import json
 import math
 import re
+import shutil
+import subprocess
+import tempfile
+from xml.etree import ElementTree as ET
+import zipfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple, get_type_hints
 
 import pandas as pd
 import streamlit as st
 import altair as alt
 from streamlit.delta_generator import DeltaGenerator
+from streamlit.errors import StreamlitAPIException
 
 from broiler_model.assumptions import Assumptions, ASSUMPTION_SCHEDULE_LAYOUT
 from broiler_model.analytics import (
@@ -37,6 +46,45 @@ from broiler_model.production import summarise_revenue_totals
 DEFAULT_CUSTOM_SIMULATION_DEFINITIONS = load_custom_simulation_definitions()
 DEFAULT_MONTE_CARLO_DISTRIBUTIONS = load_monte_carlo_distributions()
 
+RAG_DOCUMENT_TYPE_CONFIG: Dict[str, Dict[str, Any]] = {
+    "pdf": {
+        "extensions": {"pdf"},
+        "pipeline": ["pypdf/PyPDF2", "pdfplumber", "PyMuPDF", "pdfminer", "pdftotext", "OCR"],
+    },
+    "word": {
+        "extensions": {"docx"},
+        "pipeline": ["python-docx", "docx-zipxml"],
+    },
+    "excel": {
+        "extensions": {"xlsx", "xlsm", "xltx", "xltm", "xls"},
+        "pipeline": ["openpyxl/pandas", "xlsx-zipxml"],
+    },
+    "delimited": {
+        "extensions": {"csv", "tsv"},
+        "pipeline": ["utf-8 delimited parser"],
+    },
+    "json": {
+        "extensions": {"json"},
+        "pipeline": ["json parser"],
+    },
+    "markup": {
+        "extensions": {"html", "htm", "xml"},
+        "pipeline": ["tag-strip text extraction"],
+    },
+    "pptx": {
+        "extensions": {"pptx"},
+        "pipeline": ["python-pptx", "pptx-zipxml"],
+    },
+    "text": {
+        "extensions": {"txt", "md", "log"},
+        "pipeline": ["plain text"],
+    },
+    "archive": {
+        "extensions": {"zip"},
+        "pipeline": ["zip expansion into supported files"],
+    },
+}
+
 
 ROW_REMOVAL_COLUMN = "Remove row"
 ROW_EDIT_COLUMN = "Edit row"
@@ -57,6 +105,54 @@ def _to_numeric(series: pd.Series) -> pd.Series:
     """Coerce a pandas Series to numeric values where possible."""
 
     return pd.to_numeric(series, errors="coerce")
+
+
+def _to_float(value: Any) -> Optional[float]:
+    """Return float when value is numeric-like, otherwise ``None``."""
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tokenize_text(text: str) -> List[str]:
+    """Tokenize text into lowercase alphanumeric terms."""
+
+    return [token for token in re.findall(r"[a-z0-9]+", (text or "").lower()) if token]
+
+
+def _rag_supported_extensions(include_archives: bool = True) -> List[str]:
+    """Return sorted list of supported RAG upload extensions."""
+
+    supported: List[str] = []
+    for doc_type, config in RAG_DOCUMENT_TYPE_CONFIG.items():
+        if not include_archives and doc_type == "archive":
+            continue
+        supported.extend(sorted(config.get("extensions", [])))
+    return sorted(set(supported))
+
+
+def _resolve_rag_document_type(suffix: str) -> str:
+    """Map a file suffix to configured RAG document type."""
+
+    suffix = (suffix or "").lower().strip(".")
+    for doc_type, config in RAG_DOCUMENT_TYPE_CONFIG.items():
+        if suffix in config.get("extensions", set()):
+            return doc_type
+    return "unknown"
 
 
 def _records_match(left: Iterable[Dict[str, Any]], right: Iterable[Dict[str, Any]]) -> bool:
@@ -87,6 +183,23 @@ def _build_revenue_stack_chart(summary_df: pd.DataFrame) -> Optional[alt.Chart]:
         return None
 
     chart_data["Year"] = chart_data["Year"].astype(int)
+    unique_years = sorted(chart_data["Year"].unique())
+
+    if len(unique_years) <= 1:
+        return (
+            alt.Chart(chart_data)
+            .mark_bar(opacity=0.85)
+            .encode(
+                x=alt.X("Category:N", title="Category"),
+                y=alt.Y("sum(Revenue):Q", title="Revenue (USD)"),
+                color=alt.Color("Category:N", title="Category"),
+                tooltip=[
+                    alt.Tooltip("Category:N"),
+                    alt.Tooltip("Year:O"),
+                    alt.Tooltip("Revenue:Q", title="Revenue", format=",.0f"),
+                ],
+            )
+        )
 
     return (
         alt.Chart(chart_data)
@@ -324,6 +437,1080 @@ def _combined_leverage_chart(
             ],
         )
     )
+
+
+def _format_currency(value: Any) -> str:
+    """Return a compact currency representation for numeric values."""
+
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "N/A"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"${numeric:,.0f}"
+
+
+def _format_ratio(value: Any, digits: int = 2) -> str:
+    """Return a fixed precision ratio string for display."""
+
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "N/A"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"{numeric:.{digits}f}x"
+
+
+def _build_income_composition_chart(income_df: pd.DataFrame) -> Optional[alt.Chart]:
+    """Render a grouped bar chart for revenue, EBITDA, and net income by year."""
+
+    if income_df.empty or "year" not in income_df.columns:
+        return None
+
+    records: List[Dict[str, Any]] = []
+    for _, row in income_df.iterrows():
+        year = row.get("year")
+        for column, label in (
+            ("revenue", "Revenue"),
+            ("ebitda", "EBITDA"),
+            ("net_income", "Net income"),
+        ):
+            value = row.get(column)
+            if year is None or pd.isna(year) or value is None or pd.isna(value):
+                continue
+            records.append(
+                {
+                    "Year": int(float(year)),
+                    "Metric": label,
+                    "Value": float(value),
+                }
+            )
+
+    if not records:
+        return None
+
+    chart_df = pd.DataFrame(records)
+    return (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("Year:O", title="Year"),
+            y=alt.Y("Value:Q", title="USD"),
+            color=alt.Color("Metric:N", title="Metric"),
+            xOffset="Metric:N",
+            tooltip=[
+                alt.Tooltip("Year:O"),
+                alt.Tooltip("Metric:N"),
+                alt.Tooltip("Value:Q", format=",.0f"),
+            ],
+        )
+    )
+
+
+def _build_business_plan_markdown(
+    scenario: str,
+    assumptions: Assumptions,
+    valuation: Dict[str, Any],
+    annual_df: pd.DataFrame,
+    dscr_df: pd.DataFrame,
+    break_even_df: pd.DataFrame,
+    monte_carlo_summary_df: pd.DataFrame,
+) -> str:
+    """Build comprehensive business plan narrative text from current model outputs."""
+
+    annual_row = annual_df.iloc[0].to_dict() if not annual_df.empty else {}
+    start_year = int(getattr(assumptions, "production_start_year", 0) or 0)
+    horizon = int(getattr(assumptions, "production_horizon_years", 0) or 0)
+    end_year = start_year + max(horizon - 1, 0)
+
+    avg_dscr = dscr_df["dscr"].mean() if not dscr_df.empty and "dscr" in dscr_df.columns else None
+    avg_break_even_price = (
+        break_even_df["break_even_price_per_kg"].mean()
+        if not break_even_df.empty and "break_even_price_per_kg" in break_even_df.columns
+        else None
+    )
+
+    npv = valuation.get("npv")
+    irr = valuation.get("irr")
+    irr_text = f"{float(irr):.2%}" if isinstance(irr, (int, float)) else "N/A"
+    payback = valuation.get("payback_period_years")
+    annual_revenue = annual_row.get("revenue")
+    annual_ebitda = annual_row.get("ebitda")
+    annual_net_income = annual_row.get("net_income")
+
+    monte_carlo_p5 = None
+    monte_carlo_p50 = None
+    monte_carlo_p95 = None
+    if not monte_carlo_summary_df.empty:
+        row = monte_carlo_summary_df.iloc[0]
+        monte_carlo_p5 = row.get("npv_p5")
+        monte_carlo_p50 = row.get("npv_p50")
+        monte_carlo_p95 = row.get("npv_p95")
+
+    return f"""
+### 1) Executive Summary
+The **{scenario}** strategy for the broiler project is designed for a planning horizon from **{start_year} to {end_year}**.  
+The model estimates a project NPV of **{_format_currency(npv)}** and an IRR of **{irr_text}**, indicating expected value creation under current assumptions.
+
+### 2) Production & Operating Plan
+- Cycles per year: **{assumptions.cycles_per_year}**
+- Birds per cycle: **{assumptions.birds_per_cycle:,}**
+- Mortality rate: **{assumptions.mortality_rate:.2%}**
+- Feed conversion ratio: **{assumptions.feed_conversion_ratio:.2f}**
+
+Operational execution should prioritize biosecurity discipline, feed-efficiency optimization, and labor/energy productivity to stabilize margin delivery.
+
+### 3) Financial Performance Plan
+- Annual revenue (current run): **{_format_currency(annual_revenue)}**
+- Annual EBITDA (current run): **{_format_currency(annual_ebitda)}**
+- Annual net income (current run): **{_format_currency(annual_net_income)}**
+- Average DSCR: **{_format_ratio(avg_dscr)}**
+- Payback period: **{payback if payback is not None else 'N/A'} years**
+
+The finance plan should maintain covenant headroom with DSCR buffers and a liquidity reserve calibrated to debt-service and working-capital variability.
+
+### 4) Market, Pricing, and Break-even Strategy
+- Base live price per kg: **{_format_currency(assumptions.live_price_per_kg)}**
+- Price growth assumption: **{assumptions.price_growth:.2%}**
+- Average break-even price per kg: **{_format_currency(avg_break_even_price)}**
+
+Commercial strategy should blend contracted offtake and spot exposure to protect downside while preserving upside during favorable price cycles.
+
+### 5) Risk Assessment & Mitigation
+- Monte Carlo NPV P5: **{_format_currency(monte_carlo_p5)}**
+- Monte Carlo NPV P50: **{_format_currency(monte_carlo_p50)}**
+- Monte Carlo NPV P95: **{_format_currency(monte_carlo_p95)}**
+
+Risk controls should include feed-procurement hedging, contingency mortality protocols, and refinancing reviews to reduce free-cash-flow volatility.
+
+### 6) Implementation Roadmap
+1. **Year {start_year}:** commissioning, supplier onboarding, and operating rhythm stabilization.  
+2. **Years {start_year + 1}-{end_year}:** throughput optimization, cost benchmarking, and selective capacity/process upgrades.  
+3. **Annual cadence:** quarterly KPI reviews (margin, DSCR, mortality, FCR), scenario stress tests, and pricing strategy updates.
+""".strip()
+
+
+def _generate_investor_recommendations(
+    assumptions: Assumptions,
+    valuation: Dict[str, Any],
+    annual_df: pd.DataFrame,
+    dscr_df: pd.DataFrame,
+    break_even_df: pd.DataFrame,
+) -> List[str]:
+    """Generate practical recommendations that improve investor appeal."""
+
+    recommendations: List[str] = []
+    npv = valuation.get("npv")
+    irr = valuation.get("irr")
+    payback = valuation.get("payback_period_years")
+
+    avg_dscr = (
+        float(dscr_df["dscr"].mean())
+        if not dscr_df.empty and "dscr" in dscr_df.columns
+        else None
+    )
+    avg_break_even_price = (
+        float(break_even_df["break_even_price_per_kg"].mean())
+        if not break_even_df.empty and "break_even_price_per_kg" in break_even_df.columns
+        else None
+    )
+
+    annual_revenue = None
+    if not annual_df.empty and "revenue" in annual_df.columns:
+        revenue = annual_df.iloc[0].get("revenue")
+        annual_revenue = float(revenue) if pd.notna(revenue) else None
+
+    if isinstance(npv, (int, float)) and npv > 0:
+        recommendations.append(
+            f"Lead with the positive NPV case (**{_format_currency(npv)}**) and show a "
+            "base/downside/upside sensitivity table in investor materials."
+        )
+    else:
+        recommendations.append(
+            "Rework the investment thesis by improving price/cost assumptions and "
+            "showing a credible path to positive NPV before investor outreach."
+        )
+
+    if isinstance(irr, (int, float)):
+        if irr >= 0.18:
+            recommendations.append(
+                f"Position IRR (**{irr:.2%}**) as a strong return profile versus agri-sector "
+                "benchmarks while documenting key assumptions transparently."
+            )
+        else:
+            recommendations.append(
+                f"IRR (**{irr:.2%}**) is modest; improve attractiveness by combining operating "
+                "efficiency initiatives with financing optimization."
+            )
+
+    if avg_dscr is not None:
+        if avg_dscr >= 1.5:
+            recommendations.append(
+                f"Highlight debt-service resilience (average DSCR **{avg_dscr:.2f}x**) and "
+                "include covenant headroom charts to reassure lenders and equity partners."
+            )
+        else:
+            recommendations.append(
+                f"Strengthen bankability by improving DSCR (currently **{avg_dscr:.2f}x**) "
+                "through lower leverage or staged capex."
+            )
+
+    if avg_break_even_price is not None:
+        price_gap = assumptions.live_price_per_kg - avg_break_even_price
+        if price_gap > 0:
+            recommendations.append(
+                f"Show pricing buffer: current live price exceeds break-even by "
+                f"**{_format_currency(price_gap)} per kg**, reinforcing downside protection."
+            )
+        else:
+            recommendations.append(
+                "Current live price is at/below break-even; prioritize cost-out actions and "
+                "offtake contract repricing before a fundraise."
+            )
+
+    if isinstance(payback, (int, float)):
+        recommendations.append(
+            f"Present a milestone-based capital recovery timeline with a modeled payback of "
+            f"**{payback:.1f} years** and quarterly KPI checkpoints."
+        )
+
+    if annual_revenue is not None:
+        recommendations.append(
+            f"Package the model with a one-page investment memo anchored on expected annual "
+            f"revenue (**{_format_currency(annual_revenue)}**), unit economics, and risk controls."
+        )
+
+    recommendations.append(
+        "Increase investor trust by publishing a model governance pack: assumptions log, "
+        "version history, and scenario-testing methodology."
+    )
+
+    return recommendations
+
+
+def _confidence_band(label: str, value: float) -> str:
+    """Return confidence level for selected assumptions."""
+
+    if label == "Mortality rate":
+        return "High" if value <= 0.05 else "Medium" if value <= 0.08 else "Low"
+    if label == "Feed conversion ratio":
+        return "High" if value <= 1.65 else "Medium" if value <= 1.85 else "Low"
+    if label == "Feed cost per kg":
+        return "High" if value <= 0.50 else "Medium" if value <= 0.65 else "Low"
+    if label == "Live price per kg":
+        return "High" if value >= 1.8 else "Medium" if value >= 1.5 else "Low"
+    return "Medium"
+
+
+def _build_assumption_confidence_frame(assumptions: Assumptions) -> pd.DataFrame:
+    """Create confidence ratings for key investment assumptions."""
+
+    items = [
+        ("Live price per kg", float(assumptions.live_price_per_kg)),
+        ("Feed conversion ratio", float(assumptions.feed_conversion_ratio)),
+        ("Mortality rate", float(assumptions.mortality_rate)),
+        ("Feed cost per kg", float(assumptions.feed_cost_per_kg)),
+    ]
+    rows: List[Dict[str, Any]] = []
+    for label, value in items:
+        rows.append(
+            {
+                "Assumption": label,
+                "Value": value,
+                "Confidence": _confidence_band(label, value),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_investor_scorecard(
+    valuation: Dict[str, Any],
+    dscr_df: pd.DataFrame,
+    break_even_df: pd.DataFrame,
+    assumptions: Assumptions,
+    benchmarks: Dict[str, float],
+) -> pd.DataFrame:
+    """Build traffic-light scorecard for investors."""
+
+    irr = valuation.get("irr")
+    payback = valuation.get("payback_period_years")
+    npv = valuation.get("npv")
+    avg_dscr = (
+        float(dscr_df["dscr"].mean())
+        if not dscr_df.empty and "dscr" in dscr_df.columns
+        else None
+    )
+    break_even_price = (
+        float(break_even_df["break_even_price_per_kg"].mean())
+        if not break_even_df.empty and "break_even_price_per_kg" in break_even_df.columns
+        else None
+    )
+    price_buffer = (
+        float(assumptions.live_price_per_kg) - break_even_price
+        if break_even_price is not None
+        else None
+    )
+
+    irr_threshold = float(benchmarks.get("target_irr", 0.18))
+    dscr_threshold = float(benchmarks.get("min_dscr", 1.5))
+    payback_threshold = float(benchmarks.get("max_payback_years", 6.0))
+
+    metrics = [
+        ("NPV", npv, "positive"),
+        ("IRR", irr, "high"),
+        ("Average DSCR", avg_dscr, "high"),
+        ("Payback (years)", payback, "low"),
+        ("Price buffer vs break-even", price_buffer, "positive"),
+    ]
+    rows: List[Dict[str, Any]] = []
+    for metric, value, direction in metrics:
+        status = "🟡 Watch"
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            status = "⚪ N/A"
+        elif direction == "positive":
+            status = "🟢 Strong" if float(value) > 0 else "🔴 Weak"
+        elif direction == "high":
+            threshold = irr_threshold if metric == "IRR" else dscr_threshold
+            status = "🟢 Strong" if float(value) >= threshold else "🔴 Weak"
+        elif direction == "low":
+            status = "🟢 Strong" if float(value) <= payback_threshold else "🔴 Weak"
+
+        rows.append({"Metric": metric, "Value": value, "Status": status})
+
+    return pd.DataFrame(rows)
+
+
+def _build_ic_pack_markdown(
+    scenario: str,
+    scorecard_df: pd.DataFrame,
+    plan_markdown: str,
+    recommendations: List[str],
+) -> str:
+    """Create an investment-committee text pack for download."""
+
+    score_lines = []
+    for _, row in scorecard_df.iterrows():
+        score_lines.append(
+            f"- {row.get('Metric')}: {row.get('Status')} ({row.get('Value')})"
+        )
+    recommendation_lines = [f"- {item}" for item in recommendations]
+    return "\n".join(
+        [
+            f"# Investment Committee Pack - {scenario}",
+            "",
+            "## Investor Scorecard",
+            *score_lines,
+            "",
+            "## Comprehensive Plan",
+            plan_markdown,
+            "",
+            "## Recommended Actions",
+            *recommendation_lines,
+        ]
+    )
+
+
+def _generate_business_plan_excel_bytes(
+    scenario: str,
+    plan_markdown: str,
+    recommendations: List[str],
+    scorecard_df: pd.DataFrame,
+    confidence_df: pd.DataFrame,
+    citations: Optional[List[Dict[str, str]]] = None,
+    financial_tables: Optional[Dict[str, pd.DataFrame]] = None,
+    chart_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> bytes:
+    """Create a business-plan Excel workbook export."""
+
+    output = BytesIO()
+    try:
+        import xlsxwriter  # type: ignore  # noqa: F401
+
+        engine = "xlsxwriter"
+    except ImportError:
+        try:
+            import openpyxl  # type: ignore  # noqa: F401
+
+            engine = "openpyxl"
+        except ImportError as exc:
+            raise RuntimeError("Missing Excel writer dependency") from exc
+
+    with pd.ExcelWriter(output, engine=engine) as writer:
+        pd.DataFrame([{"Section": "Business Plan", "Content": plan_markdown}]).to_excel(
+            writer, sheet_name="Business Plan", index=False
+        )
+        pd.DataFrame({"Recommendation": recommendations}).to_excel(
+            writer, sheet_name="Recommendations", index=False
+        )
+        scorecard_df.to_excel(writer, sheet_name="Scorecard", index=False)
+        confidence_df.to_excel(writer, sheet_name="Confidence Bands", index=False)
+        if citations:
+            pd.DataFrame(citations).to_excel(
+                writer, sheet_name="RAG Citations", index=False
+            )
+        if financial_tables:
+            for sheet_name, table in financial_tables.items():
+                safe_sheet_name = re.sub(r"[^A-Za-z0-9 ]+", "", sheet_name).strip()
+                safe_sheet_name = safe_sheet_name[:31] or "Model Data"
+                export_df = table.copy()
+                for column in export_df.columns:
+                    if export_df[column].dtype == object:
+                        export_df[column] = export_df[column].apply(
+                            lambda value: json.dumps(value)
+                            if isinstance(value, (dict, list, tuple, set))
+                            else value
+                        )
+                export_df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+        if chart_payloads:
+            chart_index_rows: List[Dict[str, str]] = []
+            for chart_name, payload in chart_payloads.items():
+                safe_name = re.sub(r"[^A-Za-z0-9 ]+", "", chart_name).strip() or "Chart"
+                data_sheet = f"{safe_name} Data"[:31]
+                spec_sheet = f"{safe_name} Spec"[:31]
+                data_frame = payload.get("data")
+                if isinstance(data_frame, pd.DataFrame):
+                    data_frame.to_excel(writer, sheet_name=data_sheet, index=False)
+                spec = payload.get("spec")
+                if spec:
+                    pd.DataFrame(
+                        [{"chart": chart_name, "vega_lite_spec_json": json.dumps(spec)}]
+                    ).to_excel(writer, sheet_name=spec_sheet, index=False)
+                chart_index_rows.append(
+                    {"Chart": chart_name, "Data Sheet": data_sheet, "Spec Sheet": spec_sheet}
+                )
+            if chart_index_rows:
+                pd.DataFrame(chart_index_rows).to_excel(
+                    writer, sheet_name="Charts Index", index=False
+                )
+
+        if engine == "xlsxwriter":
+            writer.book.set_properties(
+                {"title": f"Business Plan - {scenario}", "subject": "Investor pack"}
+            )
+
+    output.seek(0)
+    return output.getvalue()
+
+
+def _generate_business_plan_csv_zip_bytes(
+    scenario: str,
+    plan_markdown: str,
+    recommendations: List[str],
+    scorecard_df: pd.DataFrame,
+    confidence_df: pd.DataFrame,
+    citations: Optional[List[Dict[str, str]]] = None,
+    financial_tables: Optional[Dict[str, pd.DataFrame]] = None,
+    chart_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> bytes:
+    """Create a ZIP of CSV/JSON artifacts when Excel engines are unavailable."""
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "README.txt",
+            (
+                f"Business plan export for scenario: {scenario}\n"
+                "Excel engines were unavailable, so this ZIP includes CSV and JSON artifacts.\n"
+            ),
+        )
+        archive.writestr("business_plan.md", plan_markdown)
+        archive.writestr(
+            "recommendations.csv",
+            pd.DataFrame({"Recommendation": recommendations}).to_csv(index=False),
+        )
+        archive.writestr("scorecard.csv", scorecard_df.to_csv(index=False))
+        archive.writestr("confidence_bands.csv", confidence_df.to_csv(index=False))
+        if citations:
+            archive.writestr("rag_citations.csv", pd.DataFrame(citations).to_csv(index=False))
+        if financial_tables:
+            for name, table in financial_tables.items():
+                safe_name = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+                archive.writestr(
+                    f"tables/{safe_name or 'model_data'}.csv", table.to_csv(index=False)
+                )
+        if chart_payloads:
+            index_rows: List[Dict[str, str]] = []
+            for chart_name, payload in chart_payloads.items():
+                safe_name = re.sub(r"[^a-z0-9]+", "_", chart_name.lower()).strip("_")
+                data_frame = payload.get("data")
+                if isinstance(data_frame, pd.DataFrame):
+                    archive.writestr(
+                        f"charts/{safe_name or 'chart'}_data.csv",
+                        data_frame.to_csv(index=False),
+                    )
+                spec = payload.get("spec")
+                if spec:
+                    archive.writestr(
+                        f"charts/{safe_name or 'chart'}_spec.json",
+                        json.dumps(spec, indent=2),
+                    )
+                index_rows.append(
+                    {
+                        "chart": chart_name,
+                        "data_file": f"charts/{safe_name or 'chart'}_data.csv",
+                        "spec_file": f"charts/{safe_name or 'chart'}_spec.json",
+                    }
+                )
+            if index_rows:
+                archive.writestr(
+                    "charts/index.csv", pd.DataFrame(index_rows).to_csv(index=False)
+                )
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _generate_business_plan_docx_bytes(
+    title: str,
+    plan_markdown: str,
+    recommendations: List[str],
+    citations: Optional[List[Dict[str, str]]] = None,
+) -> bytes:
+    """Create a Word document export for the generated business plan."""
+
+    try:
+        from docx import Document  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("Word export requires `python-docx`.") from exc
+
+    document = Document()
+    document.add_heading(title, level=1)
+    for paragraph in plan_markdown.split("\n\n"):
+        stripped = paragraph.strip()
+        if stripped:
+            document.add_paragraph(stripped)
+
+    document.add_heading("Investor Recommendations", level=2)
+    for item in recommendations:
+        document.add_paragraph(item, style="List Bullet")
+    if citations:
+        document.add_heading("RAG Source Citations", level=2)
+        for citation in citations:
+            document.add_paragraph(
+                f"{citation.get('section')}: {citation.get('source')} ({citation.get('chunk_id')})",
+                style="List Bullet",
+            )
+
+    output = BytesIO()
+    document.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def _generate_business_plan_pdf_bytes(
+    title: str,
+    plan_markdown: str,
+    recommendations: List[str],
+    citations: Optional[List[Dict[str, str]]] = None,
+) -> bytes:
+    """Create a PDF export for the generated business plan."""
+
+    try:
+        from reportlab.lib.pagesizes import letter  # type: ignore
+        from reportlab.pdfgen import canvas  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("PDF export requires `reportlab`.") from exc
+
+    output = BytesIO()
+    pdf = canvas.Canvas(output, pagesize=letter)
+    width, height = letter
+    y = height - 40
+
+    def _write_line(text: str, *, bold: bool = False) -> None:
+        nonlocal y
+        if y < 50:
+            pdf.showPage()
+            y = height - 40
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", 10)
+        pdf.drawString(40, y, text[:120])
+        y -= 14
+
+    _write_line(title, bold=True)
+    _write_line("")
+    for line in plan_markdown.splitlines():
+        _write_line(line)
+    _write_line("")
+    _write_line("Investor Recommendations", bold=True)
+    for item in recommendations:
+        _write_line(f"- {item}")
+    if citations:
+        _write_line("")
+        _write_line("RAG Source Citations", bold=True)
+        for citation in citations:
+            _write_line(
+                f"- {citation.get('section')}: {citation.get('source')} ({citation.get('chunk_id')})"
+            )
+
+    pdf.save()
+    output.seek(0)
+    return output.getvalue()
+
+
+def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[str]]:
+    """Extract text from uploaded files and return (text, parser_used, error_message)."""
+
+    def _extract_docx_via_zip(data: bytes) -> str:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            xml_payload = archive.read("word/document.xml")
+        root = ET.fromstring(xml_payload)
+        texts = [node.text for node in root.iter() if node.tag.endswith("}t") and node.text]
+        return "\n".join(texts).strip()
+
+    def _extract_xlsx_via_zip(data: bytes) -> str:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            shared_strings: List[str] = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                shared_strings = [
+                    "".join(t.text or "" for t in si.iter() if t.tag.endswith("}t"))
+                    for si in shared_root.iter()
+                    if si.tag.endswith("}si")
+                ]
+            sheet_files = [
+                name for name in archive.namelist() if name.startswith("xl/worksheets/sheet")
+            ]
+            lines: List[str] = []
+            for sheet_name in sorted(sheet_files):
+                root = ET.fromstring(archive.read(sheet_name))
+                lines.append(f"[Sheet: {sheet_name.split('/')[-1]}]")
+                for row in root.iter():
+                    if not row.tag.endswith("}row"):
+                        continue
+                    values: List[str] = []
+                    for cell in row:
+                        if not cell.tag.endswith("}c"):
+                            continue
+                        cell_type = cell.attrib.get("t")
+                        value_node = next((c for c in cell if c.tag.endswith("}v")), None)
+                        if value_node is None or value_node.text is None:
+                            continue
+                        value_text = value_node.text
+                        if cell_type == "s":
+                            try:
+                                idx = int(value_text)
+                                value_text = shared_strings[idx] if idx < len(shared_strings) else value_text
+                            except Exception:
+                                pass
+                        values.append(value_text)
+                    if values:
+                        lines.append(" | ".join(values))
+            return "\n".join(lines).strip()
+
+    def _extract_pptx_via_zip(data: bytes) -> str:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            slide_files = [
+                name for name in archive.namelist() if name.startswith("ppt/slides/slide")
+            ]
+            lines: List[str] = []
+            for slide_file in sorted(slide_files):
+                lines.append(f"[{slide_file.split('/')[-1]}]")
+                root = ET.fromstring(archive.read(slide_file))
+                texts = [
+                    node.text
+                    for node in root.iter()
+                    if node.tag.endswith("}t") and node.text and node.text.strip()
+                ]
+                lines.extend(texts)
+            return "\n".join(lines).strip()
+
+    file_name = getattr(uploaded_file, "name", "document")
+    suffix = file_name.lower().split(".")[-1] if "." in file_name else ""
+    file_bytes = uploaded_file.getvalue()
+    doc_type = _resolve_rag_document_type(suffix)
+
+    if doc_type == "text":
+        return file_bytes.decode("utf-8", errors="ignore"), "plain-text", None
+
+    if doc_type == "delimited":
+        delimiter = "\t" if suffix == "tsv" else ","
+        try:
+            decoded = file_bytes.decode("utf-8", errors="ignore")
+            lines = decoded.splitlines()
+            if not lines:
+                return "", "csv", "File is empty"
+            return decoded, f"delimited({delimiter})", None
+        except Exception as exc:
+            return "", "delimited", str(exc)
+
+    if doc_type == "json":
+        try:
+            obj = json.loads(file_bytes.decode("utf-8", errors="ignore"))
+            return json.dumps(obj, indent=2), "json", None
+        except Exception as exc:
+            return "", "json", str(exc)
+
+    if doc_type == "markup":
+        text = file_bytes.decode("utf-8", errors="ignore")
+        cleaned = re.sub(r"<[^>]+>", " ", text)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned, "markup-strip", None
+
+    if doc_type == "pdf":
+        reader_cls = None
+        try:
+            from pypdf import PdfReader as _PdfReader  # type: ignore
+
+            reader_cls = _PdfReader
+        except ImportError:
+            try:
+                from PyPDF2 import PdfReader as _PdfReader  # type: ignore
+
+                reader_cls = _PdfReader
+            except ImportError:
+                reader_cls = None
+        if reader_cls is not None:
+            try:
+                reader = reader_cls(BytesIO(file_bytes))
+                pages = [page.extract_text() or "" for page in reader.pages]
+                extracted = "\n".join(pages).strip()
+                if extracted:
+                    return extracted, getattr(reader_cls, "__module__", "pdf-reader"), None
+            except Exception:
+                pass
+
+        try:
+            import pdfplumber  # type: ignore
+
+            with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+                pages = [(page.extract_text() or "") for page in pdf.pages]
+            extracted = "\n".join(pages).strip()
+            if extracted:
+                return extracted, "pdfplumber", None
+        except Exception:
+            pass
+
+        try:
+            import fitz  # type: ignore
+
+            document = fitz.open(stream=file_bytes, filetype="pdf")
+            pages = [page.get_text("text") or "" for page in document]
+            extracted = "\n".join(pages).strip()
+            if extracted:
+                return extracted, "pymupdf", None
+        except Exception:
+            pass
+
+        try:
+            from pdfminer.high_level import extract_text as _pdfminer_extract_text  # type: ignore
+
+            extracted = (_pdfminer_extract_text(BytesIO(file_bytes)) or "").strip()
+            if extracted:
+                return extracted, "pdfminer.six", None
+        except Exception:
+            pass
+
+        if shutil.which("pdftotext"):
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".pdf") as src_file, tempfile.NamedTemporaryFile(
+                    suffix=".txt"
+                ) as out_file:
+                    src_file.write(file_bytes)
+                    src_file.flush()
+                    subprocess.run(
+                        ["pdftotext", "-layout", src_file.name, out_file.name],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    out_file.seek(0)
+                    extracted = out_file.read().decode("utf-8", errors="ignore").strip()
+                    if extracted:
+                        return extracted, "pdftotext", None
+            except Exception:
+                pass
+
+        if shutil.which("tesseract"):
+            try:
+                from pdf2image import convert_from_bytes  # type: ignore
+                import pytesseract  # type: ignore
+
+                images = convert_from_bytes(file_bytes, dpi=220)
+                ocr_pages = [(pytesseract.image_to_string(img) or "").strip() for img in images]
+                extracted = "\n".join([text for text in ocr_pages if text]).strip()
+                if extracted:
+                    return extracted, "ocr-pytesseract(pdf2image)", None
+            except Exception:
+                pass
+
+            try:
+                import fitz  # type: ignore
+                from PIL import Image  # type: ignore
+                import pytesseract  # type: ignore
+
+                doc = fitz.open(stream=file_bytes, filetype="pdf")
+                ocr_pages: List[str] = []
+                for page in doc:
+                    pix = page.get_pixmap(dpi=220)
+                    image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    ocr_pages.append((pytesseract.image_to_string(image) or "").strip())
+                extracted = "\n".join([text for text in ocr_pages if text]).strip()
+                if extracted:
+                    return extracted, "ocr-pytesseract(pymupdf)", None
+            except Exception:
+                pass
+
+        return "", "pdf", (
+            "No PDF parser/OCR could extract text "
+            "(pypdf/PyPDF2/pdfplumber/PyMuPDF/pdfminer/pdftotext; OCR requires tesseract + pdf2image or PyMuPDF+Pillow+pytesseract)."
+        )
+
+    if doc_type == "word":
+        try:
+            from docx import Document  # type: ignore
+        except ImportError:
+            try:
+                extracted = _extract_docx_via_zip(file_bytes)
+                if extracted:
+                    return extracted, "docx-zipxml", None
+            except Exception:
+                pass
+            return "", "docx", "python-docx is not installed and ZIP-XML fallback failed"
+        try:
+            document = Document(BytesIO(file_bytes))
+            text = "\n".join(p.text for p in document.paragraphs if p.text.strip())
+            if text.strip():
+                return text, "python-docx", None
+        except Exception:
+            pass
+        try:
+            extracted = _extract_docx_via_zip(file_bytes)
+            if extracted:
+                return extracted, "docx-zipxml", None
+        except Exception as exc:
+            return "", "docx", str(exc)
+        return "", "docx", "Could not extract text from DOCX"
+
+    if doc_type == "excel" and suffix in {"xlsx", "xlsm", "xltx", "xltm"}:
+        try:
+            from openpyxl import load_workbook  # type: ignore
+
+            workbook = load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
+            lines: List[str] = []
+            for sheet in workbook.worksheets:
+                lines.append(f"[Sheet: {sheet.title}]")
+                for row in sheet.iter_rows(values_only=True):
+                    values = [str(cell) for cell in row if cell is not None and str(cell).strip()]
+                    if values:
+                        lines.append(" | ".join(values))
+            extracted = "\n".join(lines).strip()
+            if extracted:
+                return extracted, "openpyxl", None
+        except Exception as exc:
+            openpyxl_error = str(exc)
+        else:
+            openpyxl_error = ""
+        try:
+            extracted = _extract_xlsx_via_zip(file_bytes)
+            if extracted:
+                return extracted, "xlsx-zipxml", None
+        except Exception:
+            pass
+        return "", "xlsx", openpyxl_error or "Could not extract text from XLSX"
+
+    if doc_type == "excel" and suffix == "xls":
+        try:
+            import pandas as _pd  # type: ignore
+
+            workbook = _pd.read_excel(BytesIO(file_bytes), sheet_name=None)
+            lines: List[str] = []
+            for sheet_name, frame in workbook.items():
+                lines.append(f"[Sheet: {sheet_name}]")
+                for _, row in frame.fillna("").astype(str).head(500).iterrows():
+                    row_values = [val for val in row.tolist() if str(val).strip()]
+                    if row_values:
+                        lines.append(" | ".join(row_values))
+            extracted = "\n".join(lines).strip()
+            if extracted:
+                return extracted, "pandas-xls", None
+        except Exception as exc:
+            return "", "xls", str(exc)
+        return "", "xls", "Could not extract text from XLS"
+
+    if doc_type == "pptx":
+        try:
+            from pptx import Presentation  # type: ignore
+
+            prs = Presentation(BytesIO(file_bytes))
+            lines = []
+            for idx, slide in enumerate(prs.slides, start=1):
+                lines.append(f"[Slide {idx}]")
+                for shape in slide.shapes:
+                    text = getattr(shape, "text", "")
+                    if text and text.strip():
+                        lines.append(text.strip())
+            extracted = "\n".join(lines).strip()
+            if extracted:
+                return extracted, "python-pptx", None
+        except Exception as exc:
+            pptx_error = str(exc)
+        else:
+            pptx_error = ""
+        try:
+            extracted = _extract_pptx_via_zip(file_bytes)
+            if extracted:
+                return extracted, "pptx-zipxml", None
+        except Exception:
+            pass
+        return "", "pptx", pptx_error or "Could not extract text from PPTX"
+
+    fallback = file_bytes.decode("utf-8", errors="ignore").strip()
+    if fallback:
+        return fallback, "fallback-utf8", None
+    return "", "unknown", "Unsupported or binary file format with no text parser available."
+
+
+def _expand_uploaded_documents(uploaded_docs: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    """Expand uploaded files, including ZIP archives, into parseable payloads."""
+
+    expanded: List[Dict[str, Any]] = []
+    supported_suffixes = set(_rag_supported_extensions(include_archives=False))
+    for uploaded in uploaded_docs or []:
+        name = getattr(uploaded, "name", "document")
+        file_bytes = uploaded.getvalue()
+        suffix = name.lower().split(".")[-1] if "." in name else ""
+        if suffix != "zip":
+            expanded.append({"name": name, "payload": file_bytes, "supported": suffix in supported_suffixes})
+            continue
+        try:
+            with zipfile.ZipFile(BytesIO(file_bytes)) as archive:
+                members = [
+                    m
+                    for m in archive.namelist()
+                    if not m.endswith("/") and not m.startswith("__MACOSX/")
+                ]
+                for member in members:
+                    member_suffix = member.lower().split(".")[-1] if "." in member else ""
+                    expanded.append(
+                        {
+                            "name": f"{name}:{member}",
+                            "payload": archive.read(member),
+                            "supported": member_suffix in supported_suffixes,
+                        }
+                    )
+        except Exception:
+            expanded.append({"name": name, "payload": file_bytes, "supported": False})
+    return expanded
+
+
+def _extract_text_from_payload(file_name: str, payload: bytes) -> Tuple[str, str, Optional[str]]:
+    """Parse text from a raw file payload by adapting to upload parser interface."""
+
+    class _UploadedPayload:
+        def __init__(self, name: str, data: bytes) -> None:
+            self.name = name
+            self._data = data
+
+        def getvalue(self) -> bytes:
+            return self._data
+
+    return _extract_text_from_upload(_UploadedPayload(file_name, payload))
+
+
+def _chunk_document_text(
+    source_name: str, text: str, chunk_size: int = 1200, overlap: int = 150
+) -> List[Dict[str, Any]]:
+    """Create overlapping chunks from a source document."""
+
+    clean_text = re.sub(r"\s+", " ", text).strip()
+    if not clean_text:
+        return []
+
+    chunks: List[Dict[str, Any]] = []
+    start = 0
+    idx = 1
+    while start < len(clean_text):
+        end = min(start + chunk_size, len(clean_text))
+        excerpt = clean_text[start:end].strip()
+        if excerpt:
+            chunks.append(
+                {
+                    "chunk_id": f"{source_name}::chunk_{idx}",
+                    "source": source_name,
+                    "text": excerpt,
+                }
+            )
+            idx += 1
+        if end >= len(clean_text):
+            break
+        start = max(0, end - overlap)
+
+    return chunks
+
+
+def _simple_tokenise(text: str) -> List[str]:
+    """Tokenise text for lightweight lexical retrieval."""
+
+    return re.findall(r"[a-zA-Z0-9]+", text.lower())
+
+
+def _retrieve_evidence_for_sections(
+    chunks: List[Dict[str, Any]],
+    section_queries: Dict[str, str],
+    top_k: int = 3,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Return top-k chunk matches per section using lexical overlap scoring."""
+
+    if not chunks:
+        return {section: [] for section in section_queries}
+
+    chunk_payload: List[Tuple[Dict[str, Any], set[str]]] = []
+    for chunk in chunks:
+        tokens = set(_simple_tokenise(chunk.get("text", "")))
+        chunk_payload.append((chunk, tokens))
+
+    section_matches: Dict[str, List[Dict[str, Any]]] = {}
+    for section, query in section_queries.items():
+        query_tokens = set(_simple_tokenise(query))
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for chunk, tokens in chunk_payload:
+            if not tokens:
+                continue
+            overlap = len(query_tokens & tokens)
+            if overlap <= 0:
+                continue
+            score = overlap / max(len(query_tokens), 1)
+            scored.append((score, chunk))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        section_matches[section] = [item[1] for item in scored[:top_k]]
+
+    return section_matches
+
+
+def _rewrite_plan_with_rag_evidence(
+    base_plan_markdown: str,
+    section_evidence: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[str, List[Dict[str, str]]]:
+    """Augment business plan narrative with RAG-backed evidence snippets."""
+
+    evidence_lines: List[str] = [
+        "## Evidence-backed research addendum",
+        "The following evidence was retrieved from uploaded documents and integrated into the plan:",
+        "",
+    ]
+    citations: List[Dict[str, str]] = []
+
+    for section, chunks in section_evidence.items():
+        evidence_lines.append(f"### {section}")
+        if not chunks:
+            evidence_lines.append("- No relevant evidence retrieved for this section.")
+            evidence_lines.append("")
+            continue
+        for idx, chunk in enumerate(chunks, start=1):
+            snippet = chunk.get("text", "").strip()[:260]
+            source = chunk.get("source", "Unknown source")
+            evidence_lines.append(f"- {snippet}... *(Source: {source})*")
+            citations.append(
+                {
+                    "section": section,
+                    "source": source,
+                    "chunk_id": chunk.get("chunk_id", f"{source}-{idx}"),
+                }
+            )
+        evidence_lines.append("")
+
+    rewritten = f"{base_plan_markdown}\n\n" + "\n".join(evidence_lines).strip()
+    return rewritten, citations
 
 
 def _tornado_chart(
@@ -671,6 +1858,234 @@ def _ai_settings_to_payload(settings: Dict[str, Any], payload: Dict[str, Any]) -
     payload["ai_settings"] = settings
 
 
+def _classify_question_intent(question: str) -> str:
+    """Classify user question into a finance-analysis intent."""
+
+    q = question.lower()
+    intent_rules = [
+        ("debt_capacity", ["debt", "dscr", "coverage", "leverage", "covenant"]),
+        ("risk", ["risk", "volatility", "downside", "stress", "uncertain"]),
+        ("scenario", ["scenario", "what-if", "sensitivity", "case", "simulate"]),
+        ("operational_kpi", ["production", "cycle", "mortality", "feed", "revenue", "kpi"]),
+        ("fundraising_narrative", ["investor", "fundraising", "pitch", "memo", "investment"]),
+        ("valuation", ["npv", "irr", "value", "valuation", "return", "payback"]),
+    ]
+    for intent, keywords in intent_rules:
+        if any(keyword in q for keyword in keywords):
+            return intent
+    return "valuation"
+
+
+def _compute_chat_kpis(
+    context_frames: Dict[str, pd.DataFrame], valuation: Dict[str, Any]
+) -> Dict[str, float]:
+    """Compute deterministic KPI snapshot from model outputs."""
+
+    kpis: Dict[str, float] = {}
+    npv = valuation.get("npv")
+    irr = valuation.get("irr")
+    if isinstance(npv, (int, float)):
+        kpis["npv"] = float(npv)
+    if isinstance(irr, (int, float)):
+        kpis["irr"] = float(irr)
+
+    dscr_df = context_frames.get("DSCR", pd.DataFrame())
+    if not dscr_df.empty and "dscr" in dscr_df.columns:
+        values = pd.to_numeric(dscr_df["dscr"], errors="coerce").dropna()
+        if not values.empty:
+            kpis["avg_dscr"] = float(values.mean())
+            kpis["min_dscr"] = float(values.min())
+
+    annual_totals_df = context_frames.get("Revenue annual totals", pd.DataFrame())
+    if not annual_totals_df.empty and {"Year", "Revenue"}.issubset(annual_totals_df.columns):
+        rev = annual_totals_df.copy()
+        rev["Revenue"] = pd.to_numeric(rev["Revenue"], errors="coerce")
+        rev = rev.dropna(subset=["Revenue"])
+        if len(rev) >= 2 and rev["Revenue"].iloc[0] > 0:
+            start = float(rev["Revenue"].iloc[0])
+            end = float(rev["Revenue"].iloc[-1])
+            years = max(len(rev) - 1, 1)
+            kpis["revenue_cagr"] = (end / start) ** (1 / years) - 1
+
+    cashflow_df = context_frames.get("Cash flows", pd.DataFrame())
+    if not cashflow_df.empty and "free_cash_flow" in cashflow_df.columns:
+        fcf = pd.to_numeric(cashflow_df["free_cash_flow"], errors="coerce").dropna()
+        if not fcf.empty:
+            kpis["latest_fcf"] = float(fcf.iloc[-1])
+
+    return kpis
+
+
+def _compute_sensitivity_impacts(kpis: Dict[str, float]) -> Dict[str, float]:
+    """Produce deterministic, transparent sensitivity proxies from KPI baseline."""
+
+    npv = kpis.get("npv", 0.0)
+    return {
+        "price_minus_5pct_npv": npv * 0.85,
+        "price_plus_5pct_npv": npv * 1.15,
+        "cost_plus_5pct_npv": npv * 0.9,
+    }
+
+
+def _select_evidence_rows(
+    question: str, context_frames: Dict[str, pd.DataFrame], intent: str, top_k: int = 5
+) -> List[Dict[str, Any]]:
+    """Select top evidence rows from intent-relevant tables only."""
+
+    intent_sources = {
+        "valuation": ["Valuation", "Cash flows", "Advanced metrics"],
+        "debt_capacity": ["DSCR", "Coverage analysis", "Leverage analysis", "Debt schedule"],
+        "risk": ["Monte Carlo summary", "Monte Carlo samples", "Risk observations", "Scenario planning"],
+        "scenario": ["What-if analysis", "Scenario planning", "Forecast projections"],
+        "operational_kpi": ["Production Cycles", "Annual summary", "Revenue annual totals", "Revenue by category"],
+        "fundraising_narrative": ["Valuation", "DSCR", "Revenue annual totals", "Risk observations"],
+    }
+    allowed = set(intent_sources.get(intent, []))
+    query_tokens = set(_tokenize_text(question))
+    scored: List[Tuple[int, str, int, str]] = []
+
+    for source, frame in context_frames.items():
+        if allowed and source not in allowed:
+            continue
+        if frame.empty:
+            continue
+        for idx, row in enumerate(frame.head(20).fillna("").astype(str).to_dict("records"), start=1):
+            row_text = "; ".join(f"{k}: {v}" for k, v in row.items() if str(v).strip())
+            score = len(query_tokens.intersection(set(_tokenize_text(row_text))))
+            if score > 0:
+                scored.append((score, source, idx, row_text))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    evidence_rows: List[Dict[str, Any]] = []
+    for score, source, row_idx, row_text in scored[:top_k]:
+        evidence_rows.append(
+            {
+                "score": score,
+                "source": source,
+                "row_idx": row_idx,
+                "row_text": row_text,
+                "citation": f"[Source: {source}, Row {row_idx}]",
+            }
+        )
+    return evidence_rows
+
+
+def _compute_confidence_score(intent: str, kpis: Dict[str, float], evidence_count: int) -> float:
+    """Compute a simple confidence score for response quality control."""
+
+    required = {
+        "valuation": ["npv", "irr"],
+        "debt_capacity": ["avg_dscr", "min_dscr"],
+        "risk": ["npv"],
+        "scenario": ["npv"],
+        "operational_kpi": ["latest_fcf"],
+        "fundraising_narrative": ["npv", "avg_dscr"],
+    }.get(intent, ["npv"])
+    available_required = sum(1 for key in required if key in kpis)
+    kpi_coverage = available_required / max(len(required), 1)
+    evidence_score = min(evidence_count / 5.0, 1.0)
+    return 0.6 * kpi_coverage + 0.4 * evidence_score
+
+
+def _validate_consistency(
+    kpis: Dict[str, float], sensitivity: Dict[str, float]
+) -> List[str]:
+    """Run basic consistency checks to suppress contradictory narratives."""
+
+    issues: List[str] = []
+    avg_dscr = kpis.get("avg_dscr")
+    min_dscr = kpis.get("min_dscr")
+    if avg_dscr is not None and min_dscr is not None and min_dscr > avg_dscr:
+        issues.append("Minimum DSCR is greater than average DSCR; check DSCR inputs.")
+    p5 = sensitivity.get("price_minus_5pct_npv")
+    p95 = sensitivity.get("price_plus_5pct_npv")
+    if p5 is not None and p95 is not None and p5 > p95:
+        issues.append("Sensitivity ordering appears inverted (P5 greater than P95).")
+    return issues
+
+
+def _run_true_deterministic_sensitivity(
+    assumptions: Assumptions,
+) -> Dict[str, float]:
+    """Run deterministic reruns with shocked assumptions for true sensitivity deltas."""
+
+    base_results = generate_model_outputs(assumptions, analytics_plan=AnalyticsPlan.summary())
+    base_npv = _to_float(base_results.get("valuation", {}).get("npv")) or 0.0
+
+    def _npv_for(**overrides: Any) -> float:
+        shocked = Assumptions(**{**asdict(assumptions), **overrides})
+        out = generate_model_outputs(shocked, analytics_plan=AnalyticsPlan.summary())
+        return _to_float(out.get("valuation", {}).get("npv")) or float("nan")
+
+    price_minus = _npv_for(live_price_per_kg=float(assumptions.live_price_per_kg) * 0.95)
+    price_plus = _npv_for(live_price_per_kg=float(assumptions.live_price_per_kg) * 1.05)
+    cost_plus = _npv_for(feed_cost_per_kg=float(assumptions.feed_cost_per_kg) * 1.05)
+
+    return {
+        "base_npv": base_npv,
+        "price_minus_5pct_npv": price_minus,
+        "price_plus_5pct_npv": price_plus,
+        "cost_plus_5pct_npv": cost_plus,
+    }
+
+
+def _answer_model_question(
+    question: str,
+    context_frames: Dict[str, pd.DataFrame],
+    assumptions: Assumptions,
+    valuation: Dict[str, Any],
+    rag_chunks: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Return a direct answer grounded only in model outputs."""
+
+    q = (question or "").strip()
+    if not q:
+        return "Please enter a question about the model outputs."
+
+    intent = _classify_question_intent(q)
+    kpis = _compute_chat_kpis(context_frames, valuation)
+    sensitivity = _run_true_deterministic_sensitivity(assumptions)
+    evidence_rows = _select_evidence_rows(q, context_frames, intent, top_k=5)
+    confidence_score = _compute_confidence_score(intent, kpis, len(evidence_rows))
+    consistency_issues = _validate_consistency(kpis, sensitivity)
+
+    if confidence_score < 0.35:
+        return (
+            "I don’t have enough high-confidence evidence from the current model outputs to answer reliably. "
+            "Please run the relevant simulation blocks (Monte Carlo / break-even / scenario planning) and ask again."
+        )
+    if consistency_issues:
+        issues_text = " ".join(consistency_issues)
+        return (
+            "I detected a model consistency issue and will avoid a potentially misleading conclusion. "
+            f"Please review inputs/results first: {issues_text}"
+        )
+
+    parts = [
+        "Direct answer from current model outputs:",
+        f"- NPV: {kpis.get('npv', float('nan')):,.0f}" if "npv" in kpis else "- NPV: N/A in current outputs",
+        f"- IRR: {kpis.get('irr', float('nan')):.2%}" if "irr" in kpis else "- IRR: N/A in current outputs",
+        f"- Avg DSCR: {kpis.get('avg_dscr', float('nan')):.2f}" if "avg_dscr" in kpis else "- Avg DSCR: N/A in current outputs",
+        f"- Min DSCR: {kpis.get('min_dscr', float('nan')):.2f}" if "min_dscr" in kpis else "- Min DSCR: N/A in current outputs",
+        f"- Latest FCF: {kpis.get('latest_fcf', float('nan')):,.0f}" if "latest_fcf" in kpis else "- Latest FCF: N/A in current outputs",
+        f"- NPV if price -5%: {sensitivity['price_minus_5pct_npv']:,.0f}",
+        f"- NPV if price +5%: {sensitivity['price_plus_5pct_npv']:,.0f}",
+        f"- NPV if costs +5%: {sensitivity['cost_plus_5pct_npv']:,.0f}",
+        "",
+        "I only used model tables/results available in this scenario (no web or external assumptions).",
+        f"Matched intent: {intent.replace('_', ' ').title()} | Confidence score: {confidence_score:.2f}",
+    ]
+
+    if evidence_rows:
+        parts.append("### Evidence mapping (model tables)")
+        for item in evidence_rows:
+            parts.append(f"- {item['citation']} {item['row_text']}")
+
+    if rag_chunks:
+        parts.append("Note: RAG documents are ignored in Model Q&A to avoid non-model claims.")
+
+    return "\n".join(parts)
+
+
 def _rerun() -> None:
     """Trigger a Streamlit rerun."""
 
@@ -709,6 +2124,33 @@ def _ensure_scenario_payload(
     return model, results
 
 
+def _normalize_scenario_payload(payload: Any) -> Dict[str, Any]:
+    """Normalize persisted scenario payloads from older/newer app versions."""
+
+    normalized: Dict[str, Any] = payload if isinstance(payload, dict) else {}
+    assumptions_payload = normalized.get("assumptions", {})
+    ai_payload = normalized.get("ai_settings", {})
+    benchmark_payload = normalized.get("investor_benchmarks", {})
+
+    if not isinstance(assumptions_payload, dict):
+        assumptions_payload = {}
+    if not isinstance(ai_payload, dict):
+        ai_payload = {}
+    if not isinstance(benchmark_payload, dict):
+        benchmark_payload = {}
+
+    normalized["assumptions"] = assumptions_payload
+    normalized["ai_settings"] = {
+        **DEFAULT_AI_SETTINGS,
+        **{k: v for k, v in ai_payload.items() if v is not None},
+    }
+    normalized["investor_benchmarks"] = {
+        **DEFAULT_INVESTOR_BENCHMARKS,
+        **{k: v for k, v in benchmark_payload.items() if v is not None},
+    }
+    return normalized
+
+
 def _generate_excel_bytes(
     model: ScenarioModel, results: Dict[str, Any], scenario: str
 ) -> bytes:
@@ -731,80 +2173,281 @@ def _generate_excel_bytes(
             )
             raise RuntimeError("Missing Excel writer dependency") from exc
 
-    with pd.ExcelWriter(buffer, engine=engine) as writer:
-        assumptions_df = pd.DataFrame(results["assumptions_schedule"])
-        assumptions_df.to_excel(writer, sheet_name="Assumptions", index=False)
+    def _excel_ready_df(frame: pd.DataFrame) -> pd.DataFrame:
+        safe = frame.copy()
+        if safe.empty:
+            return safe
+        for column in safe.columns:
+            if safe[column].dtype == object:
+                safe[column] = safe[column].apply(
+                    lambda value: json.dumps(value)
+                    if isinstance(value, (dict, list, tuple, set))
+                    else value
+                )
+        return safe
 
-        input_df = pd.DataFrame([asdict(model.assumptions)])
-        input_df.to_excel(writer, sheet_name="Input Values", index=False)
-
-        cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])
-        cycles_df.to_excel(writer, sheet_name="Production Cycles", index=False)
-
-        annual_df = pd.DataFrame([asdict(results["annual"])])
-        annual_df.to_excel(writer, sheet_name="Annual Summary", index=False)
-
-        cashflows_df = pd.DataFrame([asdict(row) for row in results["cashflows"]])
-        cashflows_df.to_excel(writer, sheet_name="Cash Flows", index=False)
-
-        valuation_df = pd.DataFrame([results["valuation"]])
-        valuation_df.to_excel(writer, sheet_name="Valuation", index=False)
-
-        financials = results["financial_statements"]
-        pd.DataFrame([asdict(row) for row in financials["income_statement"]]).to_excel(
-            writer, sheet_name="Income Statement", index=False
-        )
-        pd.DataFrame([asdict(row) for row in financials["balance_sheet"]]).to_excel(
-            writer, sheet_name="Balance Sheet", index=False
-        )
-        pd.DataFrame([asdict(row) for row in financials["cash_flow_statement"]]).to_excel(
-            writer, sheet_name="Cash Flow Statement", index=False
-        )
-        pd.DataFrame(financials["loan_schedule"]).to_excel(
-            writer, sheet_name="Debt Schedule", index=False
-        )
-
-        advanced = results["advanced_analytics"]
-        pd.DataFrame(advanced["metrics"]).to_excel(
-            writer, sheet_name="Advanced Metrics", index=False
-        )
-        pd.DataFrame(advanced["dscr"]).to_excel(writer, sheet_name="DSCR", index=False)
-        pd.DataFrame(advanced["trend"]).to_excel(
-            writer, sheet_name="Trend Analysis", index=False
-        )
-
-        for category, rows in results["revenue_schedules"].items():
-            safe_name = (
-                category.replace("(", "")
-                .replace(")", "")
-                .replace(",", "")
-                .replace("-", " ")
+    try:
+        with pd.ExcelWriter(buffer, engine=engine) as writer:
+            _excel_ready_df(pd.DataFrame(results["assumptions_schedule"])).to_excel(
+                writer, sheet_name="Assumptions", index=False
             )
-            safe_name = " ".join(word.title() for word in safe_name.split())
-            pd.DataFrame(rows).to_excel(
-                writer, sheet_name=safe_name[:31] or "Revenue", index=False
+            _excel_ready_df(pd.DataFrame([asdict(model.assumptions)])).to_excel(
+                writer, sheet_name="Input Values", index=False
+            )
+            _excel_ready_df(pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])).to_excel(
+                writer, sheet_name="Production Cycles", index=False
+            )
+            _excel_ready_df(pd.DataFrame([asdict(results["annual"])])).to_excel(
+                writer, sheet_name="Annual Summary", index=False
+            )
+            _excel_ready_df(pd.DataFrame([asdict(row) for row in results["cashflows"]])).to_excel(
+                writer, sheet_name="Cash Flows", index=False
+            )
+            _excel_ready_df(pd.DataFrame([results["valuation"]])).to_excel(
+                writer, sheet_name="Valuation", index=False
             )
 
-        ai_settings = st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS)
-        pd.DataFrame([ai_settings]).to_excel(writer, sheet_name="AI Settings", index=False)
-
-        workbook = writer.book
-        if engine == "xlsxwriter":
-            workbook.set_properties(
-                {
-                    "title": f"Broiler Model - {scenario}",
-                    "subject": "Broiler chicken financial model",
-                    "comments": "Generated via Streamlit dashboard",
-                }
+            financials = results["financial_statements"]
+            _excel_ready_df(pd.DataFrame([asdict(row) for row in financials["income_statement"]])).to_excel(
+                writer, sheet_name="Income Statement", index=False
             )
-        else:
-            props = workbook.properties
-            props.title = f"Broiler Model - {scenario}"
-            props.subject = "Broiler chicken financial model"
-            props.comments = "Generated via Streamlit dashboard"
+            _excel_ready_df(pd.DataFrame([asdict(row) for row in financials["balance_sheet"]])).to_excel(
+                writer, sheet_name="Balance Sheet", index=False
+            )
+            _excel_ready_df(pd.DataFrame([asdict(row) for row in financials["cash_flow_statement"]])).to_excel(
+                writer, sheet_name="Cash Flow Statement", index=False
+            )
+            _excel_ready_df(pd.DataFrame(financials["loan_schedule"])).to_excel(
+                writer, sheet_name="Debt Schedule", index=False
+            )
+
+            advanced = results["advanced_analytics"]
+            _excel_ready_df(pd.DataFrame(advanced["metrics"])).to_excel(
+                writer, sheet_name="Advanced Metrics", index=False
+            )
+            _excel_ready_df(pd.DataFrame(advanced["dscr"])).to_excel(
+                writer, sheet_name="DSCR", index=False
+            )
+            _excel_ready_df(pd.DataFrame(advanced["trend"])).to_excel(
+                writer, sheet_name="Trend Analysis", index=False
+            )
+
+            for category, rows in results["revenue_schedules"].items():
+                safe_name = (
+                    category.replace("(", "")
+                    .replace(")", "")
+                    .replace(",", "")
+                    .replace("-", " ")
+                )
+                safe_name = " ".join(word.title() for word in safe_name.split())
+                _excel_ready_df(pd.DataFrame(rows)).to_excel(
+                    writer, sheet_name=safe_name[:31] or "Revenue", index=False
+                )
+
+            ai_settings = st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS)
+            _excel_ready_df(pd.DataFrame([ai_settings])).to_excel(
+                writer, sheet_name="AI Settings", index=False
+            )
+
+            workbook = writer.book
+            if engine == "xlsxwriter":
+                workbook.set_properties(
+                    {
+                        "title": f"Broiler Model - {scenario}",
+                        "subject": "Broiler chicken financial model",
+                        "comments": "Generated via Streamlit dashboard",
+                    }
+                )
+            else:
+                props = workbook.properties
+                props.title = f"Broiler Model - {scenario}"
+                props.subject = "Broiler chicken financial model"
+                props.comments = "Generated via Streamlit dashboard"
+    except Exception as exc:  # pragma: no cover - surfaced in UI
+        st.error(f"Excel export failed due to serialization issue: {exc}")
+        raise RuntimeError("Excel export serialization failure") from exc
 
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def _excel_dependency_health() -> Dict[str, Any]:
+    """Return availability state for optional Excel writer dependencies."""
+
+    status = {"xlsxwriter": False, "openpyxl": False}
+    try:
+        import xlsxwriter  # type: ignore  # noqa: F401
+
+        status["xlsxwriter"] = True
+    except ImportError:
+        pass
+    try:
+        import openpyxl  # type: ignore  # noqa: F401
+
+        status["openpyxl"] = True
+    except ImportError:
+        pass
+    status["ready"] = bool(status["xlsxwriter"] or status["openpyxl"])
+    return status
+
+
+def _generate_csv_zip_bytes(
+    model: ScenarioModel, results: Dict[str, Any], scenario: str
+) -> bytes:
+    """Create a ZIP bundle of CSV reports in memory for the supplied scenario results."""
+
+    def _csv_ready_df(frame: pd.DataFrame) -> pd.DataFrame:
+        safe = frame.copy()
+        if safe.empty:
+            return safe
+        for column in safe.columns:
+            if safe[column].dtype == object:
+                safe[column] = safe[column].apply(
+                    lambda value: json.dumps(value)
+                    if isinstance(value, (dict, list, tuple, set))
+                    else value
+                )
+        return safe
+
+    export_frames: Dict[str, pd.DataFrame] = {
+        "assumptions_schedule.csv": pd.DataFrame(results["assumptions_schedule"]),
+        "input_values.csv": pd.DataFrame([asdict(model.assumptions)]),
+        "production_cycles.csv": pd.DataFrame([asdict(cycle) for cycle in results["cycles"]]),
+        "annual_summary.csv": pd.DataFrame([asdict(results["annual"])]),
+        "cash_flows.csv": pd.DataFrame([asdict(row) for row in results["cashflows"]]),
+        "valuation.csv": pd.DataFrame([results["valuation"]]),
+    }
+
+    financials = results["financial_statements"]
+    export_frames.update(
+        {
+            "income_statement.csv": pd.DataFrame(
+                [asdict(row) for row in financials["income_statement"]]
+            ),
+            "balance_sheet.csv": pd.DataFrame(
+                [asdict(row) for row in financials["balance_sheet"]]
+            ),
+            "cash_flow_statement.csv": pd.DataFrame(
+                [asdict(row) for row in financials["cash_flow_statement"]]
+            ),
+            "debt_schedule.csv": pd.DataFrame(financials["loan_schedule"]),
+        }
+    )
+
+    advanced = results["advanced_analytics"]
+    export_frames.update(
+        {
+            "advanced_metrics.csv": pd.DataFrame(advanced["metrics"]),
+            "dscr.csv": pd.DataFrame(advanced["dscr"]),
+            "trend_analysis.csv": pd.DataFrame(advanced["trend"]),
+        }
+    )
+
+    for category, rows in results["revenue_schedules"].items():
+        safe_name = re.sub(r"[^a-z0-9]+", "_", category.lower()).strip("_")
+        export_frames[f"revenue_{safe_name or 'schedule'}.csv"] = pd.DataFrame(rows)
+
+    ai_settings = st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS)
+    export_frames["ai_settings.csv"] = pd.DataFrame([ai_settings])
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "README.txt",
+            (
+                f"Broiler chicken financial model export for scenario: {scenario}\n"
+                "This archive contains CSV versions of report tabs that are normally "
+                "included in the Excel workbook export.\n"
+            ),
+        )
+        for filename, frame in export_frames.items():
+            archive.writestr(filename, _csv_ready_df(frame).to_csv(index=False))
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _generate_excel_xml_bytes(
+    model: ScenarioModel, results: Dict[str, Any], scenario: str
+) -> bytes:
+    """Create an Excel-compatible SpreadsheetML workbook without external engines."""
+
+    def _xml_ready_df(frame: pd.DataFrame) -> pd.DataFrame:
+        safe = frame.copy()
+        if safe.empty:
+            return safe
+        for column in safe.columns:
+            if safe[column].dtype == object:
+                safe[column] = safe[column].apply(
+                    lambda value: json.dumps(value)
+                    if isinstance(value, (dict, list, tuple, set))
+                    else value
+                )
+        return safe
+
+    sheets: Dict[str, pd.DataFrame] = {
+        "Assumptions": pd.DataFrame(results["assumptions_schedule"]),
+        "Input Values": pd.DataFrame([asdict(model.assumptions)]),
+        "Production Cycles": pd.DataFrame([asdict(cycle) for cycle in results["cycles"]]),
+        "Annual Summary": pd.DataFrame([asdict(results["annual"])]),
+        "Cash Flows": pd.DataFrame([asdict(row) for row in results["cashflows"]]),
+        "Valuation": pd.DataFrame([results["valuation"]]),
+    }
+    financials = results["financial_statements"]
+    sheets["Income Statement"] = pd.DataFrame(
+        [asdict(row) for row in financials["income_statement"]]
+    )
+    sheets["Balance Sheet"] = pd.DataFrame(
+        [asdict(row) for row in financials["balance_sheet"]]
+    )
+    sheets["Cash Flow Statement"] = pd.DataFrame(
+        [asdict(row) for row in financials["cash_flow_statement"]]
+    )
+    sheets["Debt Schedule"] = pd.DataFrame(financials["loan_schedule"])
+
+    lines = [
+        '<?xml version="1.0"?>',
+        '<?mso-application progid="Excel.Sheet"?>',
+        '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
+        'xmlns:o="urn:schemas-microsoft-com:office:office" '
+        'xmlns:x="urn:schemas-microsoft-com:office:excel" '
+        'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">',
+        "<DocumentProperties xmlns=\"urn:schemas-microsoft-com:office:office\">",
+        f"<Title>{xml_escape(f'Broiler Model - {scenario}')}</Title>",
+        "</DocumentProperties>",
+    ]
+
+    for raw_name, frame in sheets.items():
+        sheet_name = raw_name[:31] or "Sheet"
+        export_df = _xml_ready_df(frame)
+        lines.append(f'<Worksheet ss:Name="{xml_escape(sheet_name)}"><Table>')
+        if not export_df.empty:
+            lines.append("<Row>")
+            for col in export_df.columns:
+                lines.append(
+                    f'<Cell><Data ss:Type="String">{xml_escape(str(col))}</Data></Cell>'
+                )
+            lines.append("</Row>")
+            for row in export_df.itertuples(index=False):
+                lines.append("<Row>")
+                for value in row:
+                    if value is None or (isinstance(value, float) and math.isnan(value)):
+                        cell_value = ""
+                        cell_type = "String"
+                    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                        cell_value = str(value)
+                        cell_type = "Number"
+                    else:
+                        cell_value = str(value)
+                        cell_type = "String"
+                    lines.append(
+                        f'<Cell><Data ss:Type="{cell_type}">{xml_escape(cell_value)}</Data></Cell>'
+                    )
+                lines.append("</Row>")
+        lines.append("</Table></Worksheet>")
+
+    lines.append("</Workbook>")
+    return "\n".join(lines).encode("utf-8")
 
 
 AI_PROVIDER_OPTIONS = (
@@ -840,9 +2483,16 @@ DEFAULT_AI_SETTINGS: Dict[str, Any] = {
     "provider": "OpenAI",
     "model": "gpt-4o-mini",
     "forecast_horizon": 3,
+    "auto_run_predictive": False,
     "ml_methods": ["linear_regression"],
     "generative_features": ["summary"],
     "api_key": "",
+}
+
+DEFAULT_INVESTOR_BENCHMARKS: Dict[str, float] = {
+    "target_irr": 0.18,
+    "min_dscr": 1.5,
+    "max_payback_years": 6.0,
 }
 
 
@@ -899,8 +2549,55 @@ def _initialise_schedule_state(
         if stored_data == stored_default and stored_default != default_records:
             state["data"] = copy.deepcopy(default_records)
             state["default"] = copy.deepcopy(default_records)
+        else:
+            if default_records and stored_data:
+                sample_default = default_records[0]
+                sample_stored = stored_data[0] if isinstance(stored_data[0], dict) else {}
+                key_fields = [
+                    field
+                    for field in ("Category", "Period")
+                    if field in sample_default and field in sample_stored
+                ]
+                if key_fields:
+                    default_key_set = {
+                        tuple(row.get(field) for field in key_fields)
+                        for row in default_records
+                    }
+                    stored_key_map = {
+                        tuple(row.get(field) for field in key_fields): row
+                        for row in stored_data
+                        if isinstance(row, dict)
+                    }
+                    needs_reconcile = set(stored_key_map) != default_key_set
+                    if needs_reconcile:
+                        reconciled_rows: List[Dict[str, Any]] = []
+                        for default_row in default_records:
+                            key = tuple(default_row.get(field) for field in key_fields)
+                            if key in stored_key_map:
+                                merged = copy.deepcopy(default_row)
+                                merged.update(stored_key_map[key])
+                                reconciled_rows.append(merged)
+                            else:
+                                reconciled_rows.append(copy.deepcopy(default_row))
+                        state["data"] = reconciled_rows
+                        state["default"] = copy.deepcopy(default_records)
     df = pd.DataFrame(state.get("data", default_records))
     return df, state
+
+
+def _reset_scenario_edit_states(scenario: str) -> None:
+    """Clear per-scenario editable table caches so new assumptions fully propagate."""
+
+    for namespace in (
+        "assumption_schedule_state",
+        "revenue_schedule_state",
+        "advanced_schedule_state",
+        "custom_simulation_state",
+    ):
+        store = st.session_state.get(namespace)
+        if isinstance(store, dict) and scenario in store:
+            store.pop(scenario, None)
+            st.session_state[namespace] = store
 
 
 def _coerce_assumption_value(key: str, raw_value: Any, current_value: Any) -> Any:
@@ -1408,15 +3105,42 @@ def _render_schedule_editor(
     if instructions:
         st.caption(" ".join(instructions))
 
-    edited_df = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config=column_config,
-        disabled=not edit_enabled,
-        key=f"editor_{namespace}_{schedule_key}_{scenario}",
-    )
+    try:
+        edited_df = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config,
+            disabled=not edit_enabled,
+            key=f"editor_{namespace}_{schedule_key}_{scenario}",
+        )
+    except StreamlitAPIException:
+        fallback_df = df.copy()
+        for col in fallback_df.columns:
+            if col in {ROW_EDIT_COLUMN, ROW_REMOVAL_COLUMN}:
+                continue
+            if col in fixed_columns:
+                continue
+            series = fallback_df[col]
+            if series.dtype == object:
+                observed = {type(v) for v in series.dropna().tolist()}
+                if len(observed) > 1:
+                    fallback_df[col] = series.apply(
+                        lambda value: "" if pd.isna(value) else str(value)
+                    )
+        st.warning(
+            "Some columns had mixed data types. Falling back to text-safe editing "
+            "for compatibility."
+        )
+        edited_df = st.data_editor(
+            fallback_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            disabled=not edit_enabled,
+            key=f"editor_fallback_{namespace}_{schedule_key}_{scenario}",
+        )
 
     edited_df = pd.DataFrame(edited_df)
     row_form_applied = False
@@ -1545,6 +3269,11 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
             step=1,
             help="Number of additional years used for machine-learning revenue forecasts.",
         )
+        auto_run_predictive = form.checkbox(
+            "Auto-run predictive analytics",
+            value=bool(settings.get("auto_run_predictive", False)),
+            help="Automatically refresh predictive analytics when inputs are updated.",
+        )
 
         ml_selection = form.multiselect(
             "Machine Learning Methods",
@@ -1582,6 +3311,7 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
                 "provider": provider,
                 "model": model.strip() or "gpt-4",
                 "forecast_horizon": int(horizon),
+                "auto_run_predictive": auto_run_predictive,
                 "ml_methods": ml_codes or ["linear_regression"],
                 "generative_features": feature_codes or ["summary"],
                 "api_key": api_key.strip(),
@@ -1594,13 +3324,10 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
         _rerun()
 
 
-def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumptions:
+def assumptions_form(defaults: Assumptions) -> Assumptions:
     st.header("Model assumptions")
 
     farm_name = st.text_input("Farm name", defaults.farm_name)
-
-    ai_container = st.expander("AI & Machine Learning Settings", expanded=False)
-    _render_ai_settings(payload, ai_container)
 
     st.subheader("Input Landing Page")
     st.caption("Adjust the production, pricing, cost, and capital structure assumptions below.")
@@ -1672,6 +3399,13 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
                 "min": 0.5,
                 "max": 8.0,
                 "step": 0.1,
+            },
+            {
+                "attr": "eggs_per_cycle_default",
+                "label": "Eggs per cycle (default)",
+                "min": 0.0,
+                "max": 200000.0,
+                "step": 100.0,
             },
             {
                 "attr": "manure_price_per_ton",
@@ -1834,11 +3568,25 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
                 "step": 5000.0,
             },
             {
-                "attr": "working_capital",
-                "label": "Working capital",
+                "attr": "ar_days",
+                "label": "AR days",
                 "min": 0.0,
-                "max": 1000000.0,
-                "step": 5000.0,
+                "max": 365.0,
+                "step": 1.0,
+            },
+            {
+                "attr": "inventory_days",
+                "label": "Inventory days",
+                "min": 0.0,
+                "max": 365.0,
+                "step": 1.0,
+            },
+            {
+                "attr": "ap_days",
+                "label": "AP days",
+                "min": 0.0,
+                "max": 365.0,
+                "step": 1.0,
             },
             {
                 "attr": "depreciation_years",
@@ -1922,10 +3670,14 @@ def assumptions_form(defaults: Assumptions, payload: Dict[str, Any]) -> Assumpti
         overhead_per_cycle=float(values["overhead_per_cycle"]),
         capex_housing=float(values["capex_housing"]),
         capex_equipment=float(values["capex_equipment"]),
-        working_capital=float(values["working_capital"]),
+        ar_days=float(values["ar_days"]),
+        inventory_days=float(values["inventory_days"]),
+        ap_days=float(values["ap_days"]),
+        working_capital=float(defaults.working_capital),
         discount_rate=float(values["discount_rate"]),
         price_growth=float(values["price_growth"]),
         eggs_price_per_dozen=float(values["eggs_price_per_dozen"]),
+        eggs_per_cycle_default=float(values["eggs_per_cycle_default"]),
         manure_price_per_ton=float(values["manure_price_per_ton"]),
         live_bird_price_per_head=float(values["live_bird_price_per_head"]),
         byproduct_price_per_kg=float(values["byproduct_price_per_kg"]),
@@ -1962,29 +3714,45 @@ def main() -> None:
         scenario_store[selected_scenario] = {
             "assumptions": asdict(Assumptions()),
             "ai_settings": DEFAULT_AI_SETTINGS.copy(),
+            "investor_benchmarks": DEFAULT_INVESTOR_BENCHMARKS.copy(),
         }
-    payload = scenario_store[selected_scenario]
+    payload = _normalize_scenario_payload(scenario_store.get(selected_scenario))
+    scenario_store[selected_scenario] = payload
 
-    defaults = Assumptions(**payload.get("assumptions", {}))
+    defaults = Assumptions(**payload["assumptions"])
 
     (
         input_tab,
         production_tab,
         financials_tab,
         analytics_tab,
+        ai_ml_tab,
     ) = st.tabs(
         [
             "Input Landing Page",
             "Production & revenues",
             "Financial statements",
             "Advanced analytics",
+            "AI & machine learning settings",
         ]
     )
 
     with input_tab:
-        assumptions = assumptions_form(defaults, payload)
+        assumptions = assumptions_form(defaults)
 
+    previous_assumptions = copy.deepcopy(payload.get("assumptions", {}))
     payload["assumptions"] = asdict(assumptions)
+    if previous_assumptions != payload["assumptions"]:
+        _reset_scenario_edit_states(selected_scenario)
+        governance_store = st.session_state.setdefault("governance_log", {})
+        scenario_log = governance_store.setdefault(selected_scenario, [])
+        scenario_log.append(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": "Assumptions updated",
+            }
+        )
+        st.session_state.governance_log = governance_store
 
     ai_settings = _payload_to_ai_settings(payload)
     payload["ai_settings"] = ai_settings
@@ -2026,6 +3794,7 @@ def main() -> None:
     cycles_df = pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])
     annual_summary_obj = results["annual"]
     annual_df = pd.DataFrame([asdict(annual_summary_obj)])
+    valuation_df = pd.DataFrame([valuation])
     cashflow_df = pd.DataFrame([asdict(row) for row in results["cashflows"]])
     cashflow_bridge_frames = _prepare_cashflow_bridge_frames(cashflow_df)
     income_df = pd.DataFrame([asdict(row) for row in financials["income_statement"]])
@@ -2091,14 +3860,40 @@ def main() -> None:
         "payback": _metric_value("Payback period (years)"),
     }
 
+    payback_period_value = _to_float(_metric_value("Payback period (years)"))
+    if isinstance(payback_period_value, float) and math.isnan(payback_period_value):
+        payback_period_value = None
+    st.markdown("### Cross-page simulation KPIs")
+    kpi_cols = st.columns(1)
+    kpi_cols[0].metric(
+        "Payback period",
+        f"{payback_period_value:.2f} years"
+        if payback_period_value is not None
+        else "N/A years",
+    )
+
     with production_tab:
         download_container = st.container()
-        excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
-        excel_bytes = excel_map.get(selected_scenario)
+        export_map: Dict[str, Dict[str, Any]] = st.session_state.setdefault(
+            "model_export_map", {}
+        )
+        export_payload = export_map.get(selected_scenario)
 
         with download_container:
             st.markdown("### Excel export")
-            if not excel_bytes:
+            excel_health = _excel_dependency_health()
+            health_badge = (
+                "🟢 Healthy"
+                if excel_health.get("ready")
+                else "🟡 Fallback mode (Excel-compatible XML)"
+            )
+            st.caption(
+                "Excel dependency health check: "
+                f"{health_badge} | "
+                f"xlsxwriter={'✅' if excel_health.get('xlsxwriter') else '❌'} "
+                f"openpyxl={'✅' if excel_health.get('openpyxl') else '❌'}"
+            )
+            if not export_payload:
                 if st.button(
                     "Prepare Excel Model",
                     key=f"prepare_excel_{selected_scenario.lower()}",
@@ -2108,28 +3903,53 @@ def main() -> None:
                             excel_bytes = _generate_excel_bytes(
                                 model, results, selected_scenario
                             )
-                    except RuntimeError:
-                        excel_bytes = None
+                    except RuntimeError as exc:
+                        if "Missing Excel writer dependency" in str(exc):
+                            with st.spinner("Preparing Excel-compatible fallback export..."):
+                                excel_xml_bytes = _generate_excel_xml_bytes(
+                                    model, results, selected_scenario
+                                )
+                            export_payload = {
+                                "data": excel_xml_bytes,
+                                "file_name": f"Broiler_Financial_Model_{selected_scenario.replace(' ', '_')}_Compatible.xml",
+                                "mime": "application/xml",
+                                "label": "Download Excel-Compatible Workbook",
+                                "fallback": True,
+                            }
+                        else:
+                            export_payload = None
                     else:
-                        excel_map[selected_scenario] = excel_bytes
-                        st.session_state.excel_bytes_map = excel_map
-            if excel_bytes:
-                download_name = f"Broiler_Financial_Model_{selected_scenario.replace(' ', '_')}.xlsx"
+                        export_payload = {
+                            "data": excel_bytes,
+                            "file_name": f"Broiler_Financial_Model_{selected_scenario.replace(' ', '_')}.xlsx",
+                            "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "label": "Download Excel Model",
+                            "fallback": False,
+                        }
+
+                    if export_payload:
+                        export_map[selected_scenario] = export_payload
+                        st.session_state.model_export_map = export_map
+            if export_payload:
+                if export_payload.get("fallback"):
+                    st.warning(
+                        "Excel writer dependencies are unavailable. Downloading an Excel-compatible XML workbook instead."
+                    )
                 st.download_button(
-                    "Download Excel Model",
-                    data=excel_bytes,
-                    file_name=download_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    export_payload.get("label", "Download Model Export"),
+                    data=export_payload["data"],
+                    file_name=export_payload["file_name"],
+                    mime=export_payload["mime"],
                     key=f"download_excel_{selected_scenario.lower()}",
                 )
                 if st.button(
                     "Clear Prepared Excel",
                     key=f"clear_excel_{selected_scenario.lower()}",
                 ):
-                    excel_map.pop(selected_scenario, None)
-                    st.session_state.excel_bytes_map = excel_map
-                    excel_bytes = None
-            if not excel_bytes:
+                    export_map.pop(selected_scenario, None)
+                    st.session_state.model_export_map = export_map
+                    export_payload = None
+            if not export_payload:
                 st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
         st.subheader("Assumptions summary")
@@ -2155,10 +3975,21 @@ def main() -> None:
                 updated_assumptions, model.assumptions
             )
             if new_assumptions is not None:
+                prior_assumptions = copy.deepcopy(payload.get("assumptions", {}))
                 payload["assumptions"] = asdict(new_assumptions)
                 scenario_store[selected_scenario]["assumptions"] = asdict(
                     new_assumptions
                 )
+                if prior_assumptions != payload["assumptions"]:
+                    governance_store = st.session_state.setdefault("governance_log", {})
+                    scenario_log = governance_store.setdefault(selected_scenario, [])
+                    scenario_log.append(
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "event": "Assumption schedule edits applied",
+                        }
+                    )
+                    st.session_state.governance_log = governance_store
                 st.session_state.snapshot_scenario = selected_scenario
                 st.session_state.input_snapshot = copy.deepcopy(payload)
 
@@ -2284,6 +4115,491 @@ def main() -> None:
         with fin_tab4:
             st.dataframe(loan_df, use_container_width=True, hide_index=True)
 
+
+    with ai_ml_tab:
+        st.header("AI & Machine Learning Settings")
+        st.caption("Configure model provider, forecast methods, and generative insights options.")
+        _render_ai_settings(payload)
+        st.markdown("### Investor benchmark hurdles")
+        benchmark_defaults = payload.get(
+            "investor_benchmarks", DEFAULT_INVESTOR_BENCHMARKS.copy()
+        )
+        bcol1, bcol2, bcol3 = st.columns(3)
+        target_irr = bcol1.number_input(
+            "Target IRR",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(benchmark_defaults.get("target_irr", 0.18)),
+            step=0.01,
+            format="%.2f",
+        )
+        min_dscr = bcol2.number_input(
+            "Minimum DSCR",
+            min_value=0.5,
+            max_value=5.0,
+            value=float(benchmark_defaults.get("min_dscr", 1.5)),
+            step=0.1,
+            format="%.2f",
+        )
+        max_payback = bcol3.number_input(
+            "Max payback (years)",
+            min_value=1.0,
+            max_value=20.0,
+            value=float(benchmark_defaults.get("max_payback_years", 6.0)),
+            step=0.5,
+            format="%.1f",
+        )
+        payload["investor_benchmarks"] = {
+            "target_irr": float(target_irr),
+            "min_dscr": float(min_dscr),
+            "max_payback_years": float(max_payback),
+        }
+        st.session_state["scenario_store"][selected_scenario] = payload
+
+        scorecard_df = _build_investor_scorecard(
+            valuation,
+            dscr_df,
+            break_even_df,
+            assumptions,
+            payload["investor_benchmarks"],
+        )
+        benchmark_map = {
+            "IRR": target_irr,
+            "Average DSCR": min_dscr,
+            "Payback (years)": max_payback,
+        }
+        if not scorecard_df.empty:
+            scorecard_df = scorecard_df.copy()
+            scorecard_df["Benchmark"] = scorecard_df["Metric"].map(benchmark_map)
+            scorecard_df["Benchmark"] = scorecard_df["Benchmark"].fillna("N/A")
+            st.markdown("### Investor scorecard")
+            st.dataframe(scorecard_df, use_container_width=True, hide_index=True)
+
+        st.markdown("### Assumption confidence bands")
+        confidence_df = _build_assumption_confidence_frame(assumptions)
+        st.dataframe(confidence_df, use_container_width=True, hide_index=True)
+
+        st.markdown("### Model governance")
+        assumptions_hash = hashlib.sha256(
+            json.dumps(payload.get("assumptions", {}), sort_keys=True).encode("utf-8")
+        ).hexdigest()[:12]
+        governance_log = st.session_state.get("governance_log", {}).get(
+            selected_scenario, []
+        )
+        st.write(f"**Model version:** v1.0")
+        st.write(f"**Scenario:** {selected_scenario}")
+        st.write(f"**Assumptions hash:** `{assumptions_hash}`")
+        st.write(
+            f"**Last reviewed (UTC):** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        if governance_log:
+            st.markdown("**Recent changes:**")
+            for entry in governance_log[-5:]:
+                st.markdown(f"- {entry.get('timestamp')}: {entry.get('event')}")
+
+        st.markdown("### RAG research library")
+        st.caption(
+            "Upload research papers/documents to ground business-plan rewrites with evidence."
+        )
+        st.caption(
+            "Supported indexing formats: PDF, Word, Excel, CSV/TSV, JSON, HTML/XML, PPTX, TXT/MD/LOG, and ZIP bundles."
+        )
+        uploaded_docs = st.file_uploader(
+            "Upload research documents",
+            type=_rag_supported_extensions(include_archives=True),
+            accept_multiple_files=True,
+            key=f"rag_upload_{selected_scenario}",
+        )
+        rag_store = st.session_state.setdefault("rag_document_store", {})
+        rag_store.setdefault(selected_scenario, {"documents": [], "chunks": []})
+        if st.button(
+            "Index uploaded documents",
+            key=f"index_rag_documents_{selected_scenario}",
+        ):
+            documents: List[Dict[str, Any]] = []
+            all_chunks: List[Dict[str, Any]] = []
+            parse_diagnostics: List[Dict[str, Any]] = []
+            expanded_uploads = _expand_uploaded_documents(uploaded_docs)
+            for upload_entry in expanded_uploads:
+                file_name = upload_entry["name"]
+                payload = upload_entry["payload"]
+                if not upload_entry.get("supported", True):
+                    parse_diagnostics.append(
+                        {
+                            "File": file_name,
+                            "Type": file_name.split(".")[-1].lower() if "." in file_name else "",
+                            "Parser": "n/a",
+                            "Characters": 0,
+                            "Chunks": 0,
+                            "Status": "Skipped",
+                            "Error": "Unsupported extension for RAG indexing configuration.",
+                        }
+                    )
+                    continue
+                extracted, parser_used, parse_error = _extract_text_from_payload(file_name, payload)
+                if not extracted.strip():
+                    st.warning(
+                        f"Could not parse text for `{file_name}`. "
+                        f"Parser: {parser_used}. "
+                        f"{parse_error or 'Install optional parser dependencies for this format if needed.'}"
+                    )
+                    parse_diagnostics.append(
+                        {
+                            "File": file_name,
+                            "Type": file_name.split(".")[-1].lower() if "." in file_name else "",
+                            "Parser": parser_used,
+                            "Characters": 0,
+                            "Chunks": 0,
+                            "Status": "Failed",
+                            "Error": parse_error or "No text extracted",
+                        }
+                    )
+                    continue
+                doc_record = {
+                    "name": file_name,
+                    "char_count": len(extracted),
+                }
+                documents.append(doc_record)
+                new_chunks = _chunk_document_text(file_name, extracted)
+                all_chunks.extend(new_chunks)
+                parse_diagnostics.append(
+                    {
+                        "File": file_name,
+                        "Type": file_name.split(".")[-1].lower() if "." in file_name else "",
+                        "Parser": parser_used,
+                        "Characters": len(extracted),
+                        "Chunks": len(new_chunks),
+                        "Status": "Indexed",
+                        "Error": "",
+                    }
+                )
+            rag_store[selected_scenario] = {
+                "documents": documents,
+                "chunks": all_chunks,
+            }
+            st.session_state.rag_document_store = rag_store
+            st.success(
+                f"Indexed {len(documents)} document(s) into {len(all_chunks)} chunk(s)."
+            )
+            if parse_diagnostics:
+                st.markdown("#### Indexing diagnostics")
+                st.dataframe(pd.DataFrame(parse_diagnostics), use_container_width=True, hide_index=True)
+
+        rag_docs = rag_store.get(selected_scenario, {}).get("documents", [])
+        rag_chunks = rag_store.get(selected_scenario, {}).get("chunks", [])
+        st.write(f"Indexed documents: **{len(rag_docs)}** | Chunks: **{len(rag_chunks)}**")
+
+        st.markdown("### Model Q&A chatbox")
+        st.caption(
+            "Ask a question and get an answer strictly from this scenario's model outputs."
+        )
+        chat_history_key = f"model_chat_history_{selected_scenario}"
+        chat_history = st.session_state.setdefault(chat_history_key, [])
+        for message in chat_history:
+            with st.chat_message(message.get("role", "assistant")):
+                st.markdown(message.get("content", ""))
+
+        prompt = st.chat_input(
+            "Ask a question about this model scenario...",
+            key=f"model_chat_input_{selected_scenario}",
+        )
+        if prompt:
+            chat_history.append({"role": "user", "content": prompt})
+            qa_context_frames: Dict[str, pd.DataFrame] = {
+                "Assumptions schedule": assumption_schedule_df,
+                "Annual summary": annual_df,
+                "Valuation": valuation_df,
+                "Cash flows": cashflow_df,
+                "Income statement": income_df,
+                "Balance sheet": balance_df,
+                "Cash flow statement": cash_statement_df,
+                "Debt schedule": loan_df,
+                "Advanced metrics": metrics_df,
+                "DSCR": dscr_df,
+                "Trend analysis": trend_df,
+                "Coverage analysis": coverage_df,
+                "Leverage analysis": leverage_df,
+                "What-if analysis": what_if_df,
+                "Break-even analysis": break_even_df,
+                "Forecast projections": forecast_df,
+                "Time-series forecast": time_series_df,
+                "Scenario planning": scenario_df,
+                "Risk observations": risk_df,
+                "ML methods": ml_methods_df,
+                "Monte Carlo summary": monte_carlo_summary_df,
+                "Monte Carlo samples": monte_carlo_samples_df,
+                "Revenue by category": summary_by_category,
+                "Revenue annual totals": annual_totals_df,
+            }
+            for category, rows in revenue_schedules.items():
+                qa_context_frames[f"Revenue schedule - {category}"] = pd.DataFrame(rows)
+            answer = _answer_model_question(
+                prompt,
+                qa_context_frames,
+                assumptions,
+                valuation,
+                rag_chunks,
+            )
+            chat_history.append({"role": "assistant", "content": answer})
+            st.session_state[chat_history_key] = chat_history
+            _rerun()
+
+        st.divider()
+        st.subheader("Business Plan Agent")
+        st.caption(
+            "Generate a comprehensive, investor-ready business plan with automated analysis "
+            "and visual exhibits derived from the live model outputs."
+        )
+        generate_plan = st.button(
+            "Generate full business plan",
+            key=f"generate_business_plan_{selected_scenario}",
+            type="primary",
+        )
+        plan_state_key = f"business_plan_ready_{selected_scenario}"
+        if generate_plan:
+            st.session_state[plan_state_key] = True
+
+        if st.session_state.get(plan_state_key, False):
+            base_plan_markdown = _build_business_plan_markdown(
+                selected_scenario,
+                assumptions,
+                valuation,
+                annual_df,
+                dscr_df,
+                break_even_df,
+                monte_carlo_summary_df,
+            )
+            section_queries = {
+                "Executive Summary": "investment thesis return profile npv irr",
+                "Production & Operating Plan": "broiler operations feed conversion mortality throughput productivity",
+                "Financial Performance Plan": "ebitda cash flow dscr payback financing",
+                "Market, Pricing, and Break-even Strategy": "market demand price benchmark break-even",
+                "Risk Assessment & Mitigation": "risk volatility downside sensitivity scenario",
+                "Implementation Roadmap": "timeline milestones implementation plan",
+            }
+            rewrite_plan = st.button(
+                "Rewrite using RAG evidence",
+                key=f"rewrite_plan_with_rag_{selected_scenario}",
+                disabled=not rag_chunks,
+            )
+            citation_entries: List[Dict[str, str]] = []
+            if rewrite_plan and rag_chunks:
+                evidence = _retrieve_evidence_for_sections(rag_chunks, section_queries, top_k=3)
+                plan_markdown, citation_entries = _rewrite_plan_with_rag_evidence(
+                    base_plan_markdown, evidence
+                )
+                st.success("Business plan rewritten using indexed RAG evidence.")
+            else:
+                plan_markdown = base_plan_markdown
+            st.markdown(plan_markdown)
+            st.markdown("### Investor attractiveness recommendations")
+            investor_recommendations = _generate_investor_recommendations(
+                assumptions,
+                valuation,
+                annual_df,
+                dscr_df,
+                break_even_df,
+            )
+            for recommendation in investor_recommendations:
+                st.markdown(f"- {recommendation}")
+
+            ic_pack_text = _build_ic_pack_markdown(
+                selected_scenario,
+                scorecard_df,
+                plan_markdown,
+                investor_recommendations,
+            )
+            st.download_button(
+                "Download IC Pack (Markdown)",
+                data=ic_pack_text.encode("utf-8"),
+                file_name=f"IC_Pack_{selected_scenario.replace(' ', '_')}.md",
+                mime="text/markdown",
+                key=f"download_ic_pack_{selected_scenario}",
+            )
+            export_title = f"Business Plan - {selected_scenario}"
+            export_cols = st.columns(3)
+            with export_cols[0]:
+                try:
+                    docx_bytes = _generate_business_plan_docx_bytes(
+                        export_title,
+                        plan_markdown,
+                        investor_recommendations,
+                        citation_entries,
+                    )
+                except RuntimeError as exc:
+                    st.warning(str(exc))
+                else:
+                    st.download_button(
+                        "Download Word (.docx)",
+                        data=docx_bytes,
+                        file_name=f"Business_Plan_{selected_scenario.replace(' ', '_')}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key=f"download_business_plan_docx_{selected_scenario}",
+                    )
+            with export_cols[1]:
+                try:
+                    pdf_bytes = _generate_business_plan_pdf_bytes(
+                        export_title,
+                        plan_markdown,
+                        investor_recommendations,
+                        citation_entries,
+                    )
+                except RuntimeError as exc:
+                    st.warning(str(exc))
+                else:
+                    st.download_button(
+                        "Download PDF (.pdf)",
+                        data=pdf_bytes,
+                        file_name=f"Business_Plan_{selected_scenario.replace(' ', '_')}.pdf",
+                        mime="application/pdf",
+                        key=f"download_business_plan_pdf_{selected_scenario}",
+                    )
+            with export_cols[2]:
+                business_plan_tables: Dict[str, pd.DataFrame] = {
+                    "Assumptions Schedule": assumption_schedule_df,
+                    "Project Input Values": pd.DataFrame([asdict(assumptions)]),
+                    "Production Cycles": cycles_df,
+                    "Annual Summary": annual_df,
+                    "Cash Flow Projections": cashflow_df,
+                    "Valuation Analysis": valuation_df,
+                    "Income Statement": income_df,
+                    "Statement of Financial Position": balance_df,
+                    "Cash Flow Statement": cash_statement_df,
+                    "Debt Schedule": loan_df,
+                    "Revenue Summary by Year": annual_totals_df,
+                    "Revenue Summary by Category": summary_by_category,
+                    "Advanced Metrics": metrics_df,
+                    "DSCR Schedule": dscr_df,
+                    "Trend Analysis": trend_df,
+                    "Interest Coverage": coverage_df,
+                    "Leverage Metrics": leverage_df,
+                    "What If Analysis": what_if_df,
+                    "Break Even Analysis": break_even_df,
+                    "Scenario Planning": scenario_df,
+                    "Forecast Projections": forecast_df,
+                    "Time Series Projections": time_series_df,
+                    "Risk and Anomaly Log": risk_df,
+                    "ML Methods": ml_methods_df,
+                    "Monte Carlo Summary": monte_carlo_summary_df,
+                    "Monte Carlo Samples": monte_carlo_samples_df,
+                }
+                for category, rows in revenue_schedules.items():
+                    safe_key = f"Revenue Schedule {category}"
+                    business_plan_tables[safe_key] = pd.DataFrame(rows)
+                business_plan_tables = {
+                    key: value
+                    for key, value in business_plan_tables.items()
+                    if isinstance(value, pd.DataFrame) and not value.empty
+                }
+
+                revenue_chart = _build_revenue_stack_chart(summary_by_category)
+                income_mix_chart = _build_income_composition_chart(income_df)
+                leverage_chart = _combined_leverage_chart(dscr_df, coverage_df, leverage_df)
+
+                mc_chart: Optional[alt.Chart] = None
+                if not monte_carlo_samples_df.empty and {"iteration", "npv"}.issubset(
+                    monte_carlo_samples_df.columns
+                ):
+                    mc_chart = (
+                        alt.Chart(monte_carlo_samples_df)
+                        .mark_bar(opacity=0.8)
+                        .encode(
+                            x=alt.X("npv:Q", bin=alt.Bin(maxbins=40), title="NPV (USD)"),
+                            y=alt.Y("count():Q", title="Frequency"),
+                            tooltip=[alt.Tooltip("count():Q", title="Samples")],
+                        )
+                    )
+
+                chart_payloads: Dict[str, Dict[str, Any]] = {}
+                if revenue_chart is not None:
+                    chart_payloads["Revenue Mix and Growth"] = {
+                        "data": summary_by_category,
+                        "spec": revenue_chart.to_dict(),
+                    }
+                if income_mix_chart is not None:
+                    chart_payloads["Profitability Profile"] = {
+                        "data": income_df,
+                        "spec": income_mix_chart.to_dict(),
+                    }
+                if leverage_chart is not None:
+                    leverage_chart_data = pd.concat(
+                        [df for df in [dscr_df, coverage_df, leverage_df] if not df.empty],
+                        axis=1,
+                    )
+                    chart_payloads["Leverage and Resilience"] = {
+                        "data": leverage_chart_data,
+                        "spec": leverage_chart.to_dict(),
+                    }
+                if mc_chart is not None:
+                    chart_payloads["NPV Risk Distribution"] = {
+                        "data": monte_carlo_samples_df,
+                        "spec": mc_chart.to_dict(),
+                    }
+
+                try:
+                    plan_excel_bytes = _generate_business_plan_excel_bytes(
+                        selected_scenario,
+                        plan_markdown,
+                        investor_recommendations,
+                        scorecard_df,
+                        confidence_df,
+                        citation_entries,
+                        financial_tables=business_plan_tables,
+                        chart_payloads=chart_payloads,
+                    )
+                except RuntimeError as exc:
+                    if "Missing Excel writer dependency" in str(exc):
+                        plan_csv_zip_bytes = _generate_business_plan_csv_zip_bytes(
+                            selected_scenario,
+                            plan_markdown,
+                            investor_recommendations,
+                            scorecard_df,
+                            confidence_df,
+                            citation_entries,
+                            financial_tables=business_plan_tables,
+                            chart_payloads=chart_payloads,
+                        )
+                        st.warning(
+                            "Excel writer dependencies are unavailable. Downloading CSV ZIP export instead."
+                        )
+                        st.download_button(
+                            "Download Business Plan CSV ZIP (.zip)",
+                            data=plan_csv_zip_bytes,
+                            file_name=f"Business_Plan_{selected_scenario.replace(' ', '_')}_CSV_Export.zip",
+                            mime="application/zip",
+                            key=f"download_business_plan_csv_zip_{selected_scenario}",
+                        )
+                    else:
+                        st.warning(str(exc))
+                else:
+                    st.download_button(
+                        "Download Excel (.xlsx)",
+                        data=plan_excel_bytes,
+                        file_name=f"Business_Plan_{selected_scenario.replace(' ', '_')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_business_plan_excel_{selected_scenario}",
+                    )
+
+            summary_by_category = pd.DataFrame(revenue_summary.get("by_category", []))
+            revenue_chart = _build_revenue_stack_chart(summary_by_category)
+            if revenue_chart is not None:
+                st.markdown("#### Revenue mix and growth outlook")
+                st.altair_chart(revenue_chart, use_container_width=True)
+
+            income_mix_chart = _build_income_composition_chart(income_df)
+            if income_mix_chart is not None:
+                st.markdown("#### Profitability profile")
+                st.altair_chart(income_mix_chart, use_container_width=True)
+
+            leverage_chart = _combined_leverage_chart(dscr_df, coverage_df, leverage_df)
+            if leverage_chart is not None:
+                st.markdown("#### Leverage and debt-service resilience")
+                st.altair_chart(leverage_chart, use_container_width=True)
+
+            if mc_chart is not None:
+                st.markdown("#### NPV risk distribution")
+                st.altair_chart(mc_chart, use_container_width=True)
+
     analytics_namespace = "advanced_schedule_state"
 
     with analytics_tab:
@@ -2297,6 +4613,53 @@ def main() -> None:
                 namespace=analytics_namespace,
             )
             advanced["metrics"] = metrics_df.replace({pd.NA: None}).to_dict("records")
+
+        monte_carlo_p5 = None
+        monte_carlo_p50 = None
+        monte_carlo_p95 = None
+        if not monte_carlo_summary_df.empty:
+            summary_row = monte_carlo_summary_df.iloc[0]
+            monte_carlo_p5 = _to_float(summary_row.get("p5_npv"))
+            monte_carlo_p95 = _to_float(summary_row.get("p95_npv"))
+        if not monte_carlo_samples_df.empty and "npv" in monte_carlo_samples_df.columns:
+            npv_series = pd.to_numeric(monte_carlo_samples_df["npv"], errors="coerce").dropna()
+            if not npv_series.empty:
+                monte_carlo_p50 = float(npv_series.quantile(0.5))
+
+        avg_break_even_price = None
+        if not break_even_df.empty and "Break-even price" in break_even_df.columns:
+            break_even_series = pd.to_numeric(
+                break_even_df["Break-even price"], errors="coerce"
+            ).dropna()
+            if not break_even_series.empty:
+                avg_break_even_price = float(break_even_series.mean())
+
+        annual_net_income = None
+        if not income_df.empty and "net_income" in income_df.columns:
+            income_series = pd.to_numeric(income_df["net_income"], errors="coerce").dropna()
+            if not income_series.empty:
+                annual_net_income = float(income_series.iloc[0])
+
+        payback_period = None
+        if not metrics_df.empty and {"metric", "value"}.issubset(metrics_df.columns):
+            payback_row = metrics_df.loc[
+                metrics_df["metric"] == "Payback period (years)", "value"
+            ]
+            if not payback_row.empty:
+                payback_period = _to_float(payback_row.iloc[0])
+        st.markdown("### Simulation diagnostics")
+        st.markdown(
+            "\n".join(
+                [
+                    f"Monte Carlo NPV P5: { _format_currency(monte_carlo_p5) }",
+                    f"Monte Carlo NPV P50: { _format_currency(monte_carlo_p50) }",
+                    f"Monte Carlo NPV P95: { _format_currency(monte_carlo_p95) }",
+                    f"Average break-even price per kg: { _format_currency(avg_break_even_price) }",
+                    f"Annual net income (current run): { _format_currency(annual_net_income) }",
+                    f"Payback period: {payback_period:.2f} years" if payback_period is not None else "Payback period: N/A years",
+                ]
+            )
+        )
 
         st.subheader("Simulation builder")
         custom_defaults = copy.deepcopy(custom_definition_defaults)
@@ -2757,11 +5120,15 @@ def main() -> None:
                 pass
 
         st.subheader("Predictive analytics")
-        run_predictive = st.button(
+        auto_run_predictive = bool(ai_settings.get("auto_run_predictive", False))
+        run_predictive_clicked = st.button(
             "Run predictive analytics",
             key=f"run_predictive_{selected_scenario}",
             help="Refresh automated forecasts, time-series projections, and risk checks.",
         )
+        if auto_run_predictive:
+            st.caption("Auto-run predictive analytics is enabled for this scenario.")
+        run_predictive = run_predictive_clicked or auto_run_predictive
         if run_predictive:
             with st.spinner("Recomputing predictive analytics..."):
                 predictive = build_predictive_analytics(
@@ -2895,4 +5262,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

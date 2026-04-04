@@ -17,6 +17,7 @@ class Assumptions:
     final_weight_kg: float = 2.5
     live_price_per_kg: float = 1.85
     eggs_price_per_dozen: float = 1.9
+    eggs_per_cycle_default: float = 15000.0
     manure_price_per_ton: float = 45.0
     live_bird_price_per_head: float = 1.5
     byproduct_price_per_kg: float = 0.35
@@ -35,7 +36,10 @@ class Assumptions:
     overhead_per_cycle: float = 2700.0
     capex_housing: float = 950000.0
     capex_equipment: float = 280000.0
-    working_capital: float = 60000.0
+    ar_days: float = 35.0
+    inventory_days: float = 25.0
+    ap_days: float = 20.0
+    working_capital: float = 60000.0  # legacy field retained for backward compatibility
     discount_rate: float = 0.1
     price_growth: float = 0.02
     cost_inflation: float = 0.015
@@ -58,6 +62,7 @@ ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Production", "Feed conversion ratio", "feed_conversion_ratio"),
     ("Production", "Live price per kg", "live_price_per_kg"),
     ("Production", "Eggs price per dozen", "eggs_price_per_dozen"),
+    ("Production", "Eggs per cycle (default)", "eggs_per_cycle_default"),
     ("Production", "Manure price per ton", "manure_price_per_ton"),
     ("Production", "Live bird price per head", "live_bird_price_per_head"),
     ("Production", "By-product price per kg", "byproduct_price_per_kg"),
@@ -77,7 +82,9 @@ ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Capital structure", "Housing capex", "capex_housing"),
     ("Capital structure", "Equipment capex", "capex_equipment"),
     ("Capital structure", "Maintenance capex (annual)", "maintenance_capex_annual"),
-    ("Capital structure", "Working capital", "working_capital"),
+    ("Capital structure", "AR days", "ar_days"),
+    ("Capital structure", "Inventory days", "inventory_days"),
+    ("Capital structure", "AP days", "ap_days"),
     ("Capital structure", "Depreciation years", "depreciation_years"),
     ("Financing", "Debt ratio", "debt_ratio"),
     ("Financing", "Debt interest rate", "debt_interest_rate"),

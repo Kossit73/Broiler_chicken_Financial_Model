@@ -1160,27 +1160,47 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
         return cleaned, "markup-strip", None
 
     if doc_type == "pdf":
+        pdf_failures: List[str] = []
+
+        def _record_pdf_failure(step: str, exc: Optional[Exception] = None) -> None:
+            if exc is None:
+                pdf_failures.append(step)
+                return
+            message = str(exc).strip()
+            reason = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+            pdf_failures.append(f"{step} ({reason})")
+
         reader_cls = None
+        reader_label = "pypdf/PyPDF2"
         try:
             from pypdf import PdfReader as _PdfReader  # type: ignore
 
             reader_cls = _PdfReader
+            reader_label = "pypdf"
         except ImportError:
             try:
                 from PyPDF2 import PdfReader as _PdfReader  # type: ignore
 
                 reader_cls = _PdfReader
+                reader_label = "PyPDF2"
             except ImportError:
+                _record_pdf_failure("pypdf/PyPDF2 unavailable")
                 reader_cls = None
         if reader_cls is not None:
             try:
                 reader = reader_cls(BytesIO(file_bytes))
+                if getattr(reader, "is_encrypted", False):
+                    try:
+                        reader.decrypt("")  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                 pages = [page.extract_text() or "" for page in reader.pages]
                 extracted = "\n".join(pages).strip()
                 if extracted:
                     return extracted, getattr(reader_cls, "__module__", "pdf-reader"), None
-            except Exception:
-                pass
+                _record_pdf_failure(f"{reader_label} returned empty text")
+            except Exception as exc:
+                _record_pdf_failure(f"{reader_label} failed", exc)
 
         try:
             import pdfplumber  # type: ignore
@@ -1190,8 +1210,11 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
             extracted = "\n".join(pages).strip()
             if extracted:
                 return extracted, "pdfplumber", None
-        except Exception:
-            pass
+            _record_pdf_failure("pdfplumber returned empty text")
+        except ImportError:
+            _record_pdf_failure("pdfplumber unavailable")
+        except Exception as exc:
+            _record_pdf_failure("pdfplumber failed", exc)
 
         try:
             import fitz  # type: ignore
@@ -1201,8 +1224,11 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
             extracted = "\n".join(pages).strip()
             if extracted:
                 return extracted, "pymupdf", None
-        except Exception:
-            pass
+            _record_pdf_failure("PyMuPDF returned empty text")
+        except ImportError:
+            _record_pdf_failure("PyMuPDF unavailable")
+        except Exception as exc:
+            _record_pdf_failure("PyMuPDF failed", exc)
 
         try:
             from pdfminer.high_level import extract_text as _pdfminer_extract_text  # type: ignore
@@ -1210,8 +1236,11 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
             extracted = (_pdfminer_extract_text(BytesIO(file_bytes)) or "").strip()
             if extracted:
                 return extracted, "pdfminer.six", None
-        except Exception:
-            pass
+            _record_pdf_failure("pdfminer.six returned empty text")
+        except ImportError:
+            _record_pdf_failure("pdfminer.six unavailable")
+        except Exception as exc:
+            _record_pdf_failure("pdfminer.six failed", exc)
 
         if shutil.which("pdftotext"):
             try:
@@ -1230,8 +1259,11 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
                     extracted = _decode_bytes_to_text(out_file.read()).strip()
                     if extracted:
                         return extracted, "pdftotext", None
-            except Exception:
-                pass
+                    _record_pdf_failure("pdftotext returned empty text")
+            except Exception as exc:
+                _record_pdf_failure("pdftotext failed", exc)
+        else:
+            _record_pdf_failure("pdftotext binary unavailable")
 
         if shutil.which("tesseract"):
             try:
@@ -1243,8 +1275,11 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
                 extracted = "\n".join([text for text in ocr_pages if text]).strip()
                 if extracted:
                     return extracted, "ocr-pytesseract(pdf2image)", None
-            except Exception:
-                pass
+                _record_pdf_failure("OCR via pdf2image returned empty text")
+            except ImportError:
+                _record_pdf_failure("OCR via pdf2image unavailable")
+            except Exception as exc:
+                _record_pdf_failure("OCR via pdf2image failed", exc)
 
             try:
                 import fitz  # type: ignore
@@ -1260,12 +1295,19 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
                 extracted = "\n".join([text for text in ocr_pages if text]).strip()
                 if extracted:
                     return extracted, "ocr-pytesseract(pymupdf)", None
-            except Exception:
-                pass
+                _record_pdf_failure("OCR via PyMuPDF+Pillow returned empty text")
+            except ImportError:
+                _record_pdf_failure("OCR via PyMuPDF+Pillow unavailable")
+            except Exception as exc:
+                _record_pdf_failure("OCR via PyMuPDF+Pillow failed", exc)
+        else:
+            _record_pdf_failure("tesseract binary unavailable")
 
+        details = "; ".join(pdf_failures[:6]) if pdf_failures else "No parser diagnostics available"
         return "", "pdf", (
             "No PDF parser/OCR could extract text "
-            "(pypdf/PyPDF2/pdfplumber/PyMuPDF/pdfminer/pdftotext; OCR requires tesseract + pdf2image or PyMuPDF+Pillow+pytesseract)."
+            "(pypdf/PyPDF2/pdfplumber/PyMuPDF/pdfminer/pdftotext; OCR requires tesseract + pdf2image or PyMuPDF+Pillow+pytesseract). "
+            f"Details: {details}"
         )
 
     if doc_type == "word":

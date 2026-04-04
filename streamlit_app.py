@@ -13,6 +13,7 @@ import math
 import re
 from urllib.parse import quote_plus
 from urllib.request import urlopen
+from xml.etree import ElementTree as ET
 import zipfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple, get_type_hints
 
@@ -988,6 +989,70 @@ def _generate_business_plan_pdf_bytes(
 def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[str]]:
     """Extract text from uploaded files and return (text, parser_used, error_message)."""
 
+    def _extract_docx_via_zip(data: bytes) -> str:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            xml_payload = archive.read("word/document.xml")
+        root = ET.fromstring(xml_payload)
+        texts = [node.text for node in root.iter() if node.tag.endswith("}t") and node.text]
+        return "\n".join(texts).strip()
+
+    def _extract_xlsx_via_zip(data: bytes) -> str:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            shared_strings: List[str] = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                shared_strings = [
+                    "".join(t.text or "" for t in si.iter() if t.tag.endswith("}t"))
+                    for si in shared_root.iter()
+                    if si.tag.endswith("}si")
+                ]
+            sheet_files = [
+                name for name in archive.namelist() if name.startswith("xl/worksheets/sheet")
+            ]
+            lines: List[str] = []
+            for sheet_name in sorted(sheet_files):
+                root = ET.fromstring(archive.read(sheet_name))
+                lines.append(f"[Sheet: {sheet_name.split('/')[-1]}]")
+                for row in root.iter():
+                    if not row.tag.endswith("}row"):
+                        continue
+                    values: List[str] = []
+                    for cell in row:
+                        if not cell.tag.endswith("}c"):
+                            continue
+                        cell_type = cell.attrib.get("t")
+                        value_node = next((c for c in cell if c.tag.endswith("}v")), None)
+                        if value_node is None or value_node.text is None:
+                            continue
+                        value_text = value_node.text
+                        if cell_type == "s":
+                            try:
+                                idx = int(value_text)
+                                value_text = shared_strings[idx] if idx < len(shared_strings) else value_text
+                            except Exception:
+                                pass
+                        values.append(value_text)
+                    if values:
+                        lines.append(" | ".join(values))
+            return "\n".join(lines).strip()
+
+    def _extract_pptx_via_zip(data: bytes) -> str:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            slide_files = [
+                name for name in archive.namelist() if name.startswith("ppt/slides/slide")
+            ]
+            lines: List[str] = []
+            for slide_file in sorted(slide_files):
+                lines.append(f"[{slide_file.split('/')[-1]}]")
+                root = ET.fromstring(archive.read(slide_file))
+                texts = [
+                    node.text
+                    for node in root.iter()
+                    if node.tag.endswith("}t") and node.text and node.text.strip()
+                ]
+                lines.extend(texts)
+            return "\n".join(lines).strip()
+
     file_name = getattr(uploaded_file, "name", "document")
     suffix = file_name.lower().split(".")[-1] if "." in file_name else ""
     file_bytes = uploaded_file.getvalue()
@@ -1058,13 +1123,27 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
         try:
             from docx import Document  # type: ignore
         except ImportError:
-            return "", "docx", "python-docx is not installed"
-        document = Document(BytesIO(file_bytes))
-        return (
-            "\n".join(p.text for p in document.paragraphs if p.text.strip()),
-            "python-docx",
-            None,
-        )
+            try:
+                extracted = _extract_docx_via_zip(file_bytes)
+                if extracted:
+                    return extracted, "docx-zipxml", None
+            except Exception:
+                pass
+            return "", "docx", "python-docx is not installed and ZIP-XML fallback failed"
+        try:
+            document = Document(BytesIO(file_bytes))
+            text = "\n".join(p.text for p in document.paragraphs if p.text.strip())
+            if text.strip():
+                return text, "python-docx", None
+        except Exception:
+            pass
+        try:
+            extracted = _extract_docx_via_zip(file_bytes)
+            if extracted:
+                return extracted, "docx-zipxml", None
+        except Exception as exc:
+            return "", "docx", str(exc)
+        return "", "docx", "Could not extract text from DOCX"
 
     if suffix in {"xlsx", "xlsm", "xltx", "xltm"}:
         try:
@@ -1078,9 +1157,39 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
                     values = [str(cell) for cell in row if cell is not None and str(cell).strip()]
                     if values:
                         lines.append(" | ".join(values))
-            return "\n".join(lines).strip(), "openpyxl", None
+            extracted = "\n".join(lines).strip()
+            if extracted:
+                return extracted, "openpyxl", None
         except Exception as exc:
-            return "", "openpyxl", str(exc)
+            openpyxl_error = str(exc)
+        else:
+            openpyxl_error = ""
+        try:
+            extracted = _extract_xlsx_via_zip(file_bytes)
+            if extracted:
+                return extracted, "xlsx-zipxml", None
+        except Exception:
+            pass
+        return "", "xlsx", openpyxl_error or "Could not extract text from XLSX"
+
+    if suffix == "xls":
+        try:
+            import pandas as _pd  # type: ignore
+
+            workbook = _pd.read_excel(BytesIO(file_bytes), sheet_name=None)
+            lines: List[str] = []
+            for sheet_name, frame in workbook.items():
+                lines.append(f"[Sheet: {sheet_name}]")
+                for _, row in frame.fillna("").astype(str).head(500).iterrows():
+                    row_values = [val for val in row.tolist() if str(val).strip()]
+                    if row_values:
+                        lines.append(" | ".join(row_values))
+            extracted = "\n".join(lines).strip()
+            if extracted:
+                return extracted, "pandas-xls", None
+        except Exception as exc:
+            return "", "xls", str(exc)
+        return "", "xls", "Could not extract text from XLS"
 
     if suffix == "pptx":
         try:
@@ -1094,9 +1203,20 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
                     text = getattr(shape, "text", "")
                     if text and text.strip():
                         lines.append(text.strip())
-            return "\n".join(lines).strip(), "python-pptx", None
+            extracted = "\n".join(lines).strip()
+            if extracted:
+                return extracted, "python-pptx", None
         except Exception as exc:
-            return "", "pptx", str(exc)
+            pptx_error = str(exc)
+        else:
+            pptx_error = ""
+        try:
+            extracted = _extract_pptx_via_zip(file_bytes)
+            if extracted:
+                return extracted, "pptx-zipxml", None
+        except Exception:
+            pass
+        return "", "pptx", pptx_error or "Could not extract text from PPTX"
 
     fallback = file_bytes.decode("utf-8", errors="ignore").strip()
     if fallback:
@@ -3976,7 +4096,7 @@ def main() -> None:
         )
         uploaded_docs = st.file_uploader(
             "Upload research documents",
-            type=["pdf", "docx", "txt", "md", "csv", "tsv", "xlsx", "xlsm", "json", "html", "xml", "pptx"],
+            type=["pdf", "docx", "txt", "md", "csv", "tsv", "xlsx", "xlsm", "xls", "json", "html", "xml", "pptx"],
             accept_multiple_files=True,
             key=f"rag_upload_{selected_scenario}",
         )

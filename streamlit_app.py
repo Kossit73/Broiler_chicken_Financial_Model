@@ -1688,6 +1688,26 @@ def _generate_excel_bytes(
     return buffer.getvalue()
 
 
+def _excel_dependency_health() -> Dict[str, Any]:
+    """Return availability state for optional Excel writer dependencies."""
+
+    status = {"xlsxwriter": False, "openpyxl": False}
+    try:
+        import xlsxwriter  # type: ignore  # noqa: F401
+
+        status["xlsxwriter"] = True
+    except ImportError:
+        pass
+    try:
+        import openpyxl  # type: ignore  # noqa: F401
+
+        status["openpyxl"] = True
+    except ImportError:
+        pass
+    status["ready"] = bool(status["xlsxwriter"] or status["openpyxl"])
+    return status
+
+
 def _generate_csv_zip_bytes(
     model: ScenarioModel, results: Dict[str, Any], scenario: str
 ) -> bytes:
@@ -3175,6 +3195,18 @@ def main() -> None:
 
         with download_container:
             st.markdown("### Excel export")
+            excel_health = _excel_dependency_health()
+            health_badge = (
+                "🟢 Healthy"
+                if excel_health.get("ready")
+                else "🟡 Fallback mode (CSV ZIP)"
+            )
+            st.caption(
+                "Excel dependency health check: "
+                f"{health_badge} | "
+                f"xlsxwriter={'✅' if excel_health.get('xlsxwriter') else '❌'} "
+                f"openpyxl={'✅' if excel_health.get('openpyxl') else '❌'}"
+            )
             if not export_payload:
                 if st.button(
                     "Prepare Excel Model",

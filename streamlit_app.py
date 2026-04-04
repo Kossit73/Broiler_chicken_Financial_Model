@@ -1491,13 +1491,27 @@ def _answer_model_question(
 
     answer_sections = [lead_summary, assumptions_summary]
     if top_context:
-        answer_sections.append("Most relevant live model rows:")
-        answer_sections.extend(
-            [f"- [{source}] {row_text}" for _, source, row_text in top_context]
+        top_sources = [source for _, source, _ in top_context]
+        unique_sources = ", ".join(sorted(set(top_sources)))
+        answer_sections.append(
+            "I reviewed the live model tables most relevant to your question "
+            f"({unique_sources}) and synthesized the key facts below."
+        )
+        facts = " ".join(
+            [
+                f"In {source}, {row_text.replace('Row ', 'record ').strip()}."
+                for _, source, row_text in top_context[:3]
+            ]
+        )
+        answer_sections.append(facts)
+        answer_sections.append(
+            "Based on those records, the conclusion above reflects the current scenario outputs "
+            "and should be interpreted as a data-grounded model response."
         )
     else:
         answer_sections.append(
-            "I could not find a direct row match, but I can still answer using full model summaries."
+            "I could not find a direct row match for that phrasing, so I based the answer on the "
+            "scenario valuation and assumptions summary."
         )
 
     if rag_chunks:
@@ -1506,7 +1520,8 @@ def _answer_model_question(
             answer_sections.append("RAG evidence matches:")
             for item in evidence:
                 answer_sections.append(
-                    f"- {item.get('source')} (chunk {item.get('chunk_id')}): {item.get('snippet')[:180]}..."
+                    f"From {item.get('source')} (chunk {item.get('chunk_id')}), "
+                    f"the evidence indicates: {item.get('snippet')[:180]}..."
                 )
 
     if use_web_search:
@@ -1520,7 +1535,8 @@ def _answer_model_question(
             if abstract:
                 answer_sections.append("Web comparison snapshot:")
                 answer_sections.append(
-                    f"- {heading or 'DuckDuckGo'}: {abstract[:240]}..."
+                    f"A relevant external benchmark from {heading or 'DuckDuckGo'} states: "
+                    f"{abstract[:240]}..."
                 )
         except Exception:
             answer_sections.append(

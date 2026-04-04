@@ -128,6 +128,19 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
+
+
+def _decode_bytes_to_text(data: bytes) -> str:
+    """Decode byte payloads with lightweight encoding fallbacks."""
+
+    for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="ignore")
+
+
 def _tokenize_text(text: str) -> List[str]:
     """Tokenize text into lowercase alphanumeric terms."""
 
@@ -1120,12 +1133,12 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
     doc_type = _resolve_rag_document_type(suffix)
 
     if doc_type == "text":
-        return file_bytes.decode("utf-8", errors="ignore"), "plain-text", None
+        return _decode_bytes_to_text(file_bytes), "plain-text", None
 
     if doc_type == "delimited":
         delimiter = "\t" if suffix == "tsv" else ","
         try:
-            decoded = file_bytes.decode("utf-8", errors="ignore")
+            decoded = _decode_bytes_to_text(file_bytes)
             lines = decoded.splitlines()
             if not lines:
                 return "", "csv", "File is empty"
@@ -1135,13 +1148,13 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
 
     if doc_type == "json":
         try:
-            obj = json.loads(file_bytes.decode("utf-8", errors="ignore"))
+            obj = json.loads(_decode_bytes_to_text(file_bytes))
             return json.dumps(obj, indent=2), "json", None
         except Exception as exc:
             return "", "json", str(exc)
 
     if doc_type == "markup":
-        text = file_bytes.decode("utf-8", errors="ignore")
+        text = _decode_bytes_to_text(file_bytes)
         cleaned = re.sub(r"<[^>]+>", " ", text)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned, "markup-strip", None
@@ -1214,7 +1227,7 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
                         text=True,
                     )
                     out_file.seek(0)
-                    extracted = out_file.read().decode("utf-8", errors="ignore").strip()
+                    extracted = _decode_bytes_to_text(out_file.read()).strip()
                     if extracted:
                         return extracted, "pdftotext", None
             except Exception:
@@ -1354,7 +1367,7 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
             pass
         return "", "pptx", pptx_error or "Could not extract text from PPTX"
 
-    fallback = file_bytes.decode("utf-8", errors="ignore").strip()
+    fallback = _decode_bytes_to_text(file_bytes).strip()
     if fallback:
         return fallback, "fallback-utf8", None
     return "", "unknown", "Unsupported or binary file format with no text parser available."
@@ -2028,6 +2041,38 @@ def _run_true_deterministic_sensitivity(
     }
 
 
+
+
+def _retrieve_rag_evidence_for_question(
+    question: str,
+    chunks: Optional[List[Dict[str, Any]]],
+    top_k: int = 3,
+) -> List[Dict[str, Any]]:
+    """Return top lexical RAG chunk matches for a user question."""
+
+    if not chunks:
+        return []
+
+    query_tokens = set(_simple_tokenise(question))
+    if not query_tokens:
+        return []
+
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for chunk in chunks:
+        text = chunk.get("text", "")
+        tokens = set(_simple_tokenise(text))
+        if not tokens:
+            continue
+        overlap = len(query_tokens & tokens)
+        if overlap <= 0:
+            continue
+        score = overlap / max(len(query_tokens), 1)
+        scored.append((score, chunk))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [chunk for _, chunk in scored[:top_k]]
+
+
 def _answer_model_question(
     question: str,
     context_frames: Dict[str, pd.DataFrame],
@@ -2035,7 +2080,7 @@ def _answer_model_question(
     valuation: Dict[str, Any],
     rag_chunks: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Return a direct answer grounded only in model outputs."""
+    """Return a direct answer grounded in model outputs plus optional RAG evidence."""
 
     q = (question or "").strip()
     if not q:
@@ -2060,6 +2105,8 @@ def _answer_model_question(
             f"Please review inputs/results first: {issues_text}"
         )
 
+    rag_matches = _retrieve_rag_evidence_for_question(q, rag_chunks, top_k=3)
+
     parts = [
         "Direct answer from current model outputs:",
         f"- NPV: {kpis.get('npv', float('nan')):,.0f}" if "npv" in kpis else "- NPV: N/A in current outputs",
@@ -2071,7 +2118,7 @@ def _answer_model_question(
         f"- NPV if price +5%: {sensitivity['price_plus_5pct_npv']:,.0f}",
         f"- NPV if costs +5%: {sensitivity['cost_plus_5pct_npv']:,.0f}",
         "",
-        "I only used model tables/results available in this scenario (no web or external assumptions).",
+        "I used model tables/results in this scenario and (when available) indexed RAG snippets from uploaded files.",
         f"Matched intent: {intent.replace('_', ' ').title()} | Confidence score: {confidence_score:.2f}",
     ]
 
@@ -2080,8 +2127,13 @@ def _answer_model_question(
         for item in evidence_rows:
             parts.append(f"- {item['citation']} {item['row_text']}")
 
-    if rag_chunks:
-        parts.append("Note: RAG documents are ignored in Model Q&A to avoid non-model claims.")
+    if rag_matches:
+        parts.append("### Evidence mapping (RAG documents)")
+        for match in rag_matches:
+            snippet = " ".join(str(match.get("text", "")).split())[:280]
+            parts.append(
+                f"- [{match.get('source', 'document')}] {snippet}... (chunk: {match.get('chunk_id', 'n/a')})"
+            )
 
     return "\n".join(parts)
 

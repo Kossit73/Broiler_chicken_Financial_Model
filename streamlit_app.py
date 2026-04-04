@@ -93,6 +93,23 @@ def _build_revenue_stack_chart(summary_df: pd.DataFrame) -> Optional[alt.Chart]:
         return None
 
     chart_data["Year"] = chart_data["Year"].astype(int)
+    unique_years = sorted(chart_data["Year"].unique())
+
+    if len(unique_years) <= 1:
+        return (
+            alt.Chart(chart_data)
+            .mark_bar(opacity=0.85)
+            .encode(
+                x=alt.X("Category:N", title="Category"),
+                y=alt.Y("sum(Revenue):Q", title="Revenue (USD)"),
+                color=alt.Color("Category:N", title="Category"),
+                tooltip=[
+                    alt.Tooltip("Category:N"),
+                    alt.Tooltip("Year:O"),
+                    alt.Tooltip("Revenue:Q", title="Revenue", format=",.0f"),
+                ],
+            )
+        )
 
     return (
         alt.Chart(chart_data)

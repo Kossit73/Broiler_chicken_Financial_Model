@@ -191,22 +191,33 @@ def build_revenue_schedules(
         "Live Birds Revenue": "head",
         "By-Product (feathers, offal, livers) Revenue": "kg",
     }
+    cycles_per_year = max(int(assumptions.cycles_per_year or 1), 1)
+    projection_years = max(int(assumptions.production_horizon_years or 1), 1)
+    template_periods = cycles_per_year * projection_years
+
     broiler_rows: List[Dict[str, Any]] = []
-    for cycle in cycle_list:
+    for period in range(1, template_periods + 1):
+        cycle_number = ((period - 1) % cycles_per_year) + 1
+        year_index = ((period - 1) // cycles_per_year) + 1
+        cycle = cycle_by_number.get(cycle_number)
+        survivors = cycle.survivors if cycle else round(
+            assumptions.birds_per_cycle * (1 - assumptions.mortality_rate)
+        )
+        growth_multiplier = (1 + assumptions.price_growth) ** max(year_index - 1, 0)
+        period_unit_price = unit_price * growth_multiplier
         broiler_rows.append(
             {
                 "Category": "Broiler Revenue",
-                "Period": f"Cycle {cycle.cycle}",
+                "Period": f"Cycle {period}",
                 "Unit": unit_lookup["Broiler Revenue"],
-                "Units": cycle.survivors,
-                "Unit price": unit_price,
-                "Revenue": cycle.revenue,
+                "Units": survivors,
+                "Unit price": period_unit_price,
+                "Revenue": survivors * period_unit_price,
                 "Notes": "Derived from production cycle results",
             }
         )
     schedules["Broiler Revenue"] = broiler_rows
 
-    template_periods = assumptions.cycles_per_year or 1
     price_lookup = {
         "Eggs Revenue": assumptions.eggs_price_per_dozen,
         "Poultry Manure Revenue": assumptions.manure_price_per_ton,
@@ -228,15 +239,22 @@ def build_revenue_schedules(
     for category in REVENUE_CATEGORIES[1:]:
         template_rows = []
         yield_value = default_yield_map.get(category, 0.0)
-        unit_price_value = _to_float(price_lookup.get(category))
         for period in range(1, template_periods + 1):
-            cycle = cycle_by_number.get(period)
+            cycle_number = ((period - 1) % cycles_per_year) + 1
+            year_index = ((period - 1) // cycles_per_year) + 1
+            cycle = cycle_by_number.get(cycle_number)
             survivors = cycle.survivors if cycle else fallback_survivors
             live_weight_kg = cycle.live_weight_kg if cycle else fallback_live_weight_kg
             if category == "By-Product (feathers, offal, livers) Revenue":
                 units = live_weight_kg * yield_value
             else:
                 units = survivors * yield_value
+            unit_price_value = _to_float(price_lookup.get(category))
+            if unit_price_value is not None:
+                growth_multiplier = (1 + assumptions.price_growth) ** max(
+                    year_index - 1, 0
+                )
+                unit_price_value *= growth_multiplier
             revenue = (
                 units * unit_price_value if unit_price_value is not None else None
             )
@@ -246,7 +264,7 @@ def build_revenue_schedules(
                     "Period": f"Cycle {period}",
                     "Unit": unit_lookup.get(category, ""),
                     "Units": units,
-                    "Unit price": price_lookup.get(category),
+                    "Unit price": unit_price_value,
                     "Revenue": revenue,
                     "Notes": "Auto-estimated from assumptions (editable)",
                 }

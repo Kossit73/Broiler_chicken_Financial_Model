@@ -1563,7 +1563,7 @@ def _compute_sensitivity_impacts(kpis: Dict[str, float]) -> Dict[str, float]:
 
 def _select_evidence_rows(
     question: str, context_frames: Dict[str, pd.DataFrame], intent: str, top_k: int = 5
-) -> List[Tuple[str, str]]:
+) -> List[Dict[str, Any]]:
     """Select top evidence rows from intent-relevant tables only."""
 
     intent_sources = {
@@ -1576,7 +1576,7 @@ def _select_evidence_rows(
     }
     allowed = set(intent_sources.get(intent, []))
     query_tokens = set(_tokenize_text(question))
-    scored: List[Tuple[int, str, str]] = []
+    scored: List[Tuple[int, str, int, str]] = []
 
     for source, frame in context_frames.items():
         if allowed and source not in allowed:
@@ -1587,9 +1587,79 @@ def _select_evidence_rows(
             row_text = "; ".join(f"{k}: {v}" for k, v in row.items() if str(v).strip())
             score = len(query_tokens.intersection(set(_tokenize_text(row_text))))
             if score > 0:
-                scored.append((score, source, f"Row {idx}: {row_text}"))
+                scored.append((score, source, idx, row_text))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [(source, row) for _, source, row in scored[:top_k]]
+    evidence_rows: List[Dict[str, Any]] = []
+    for score, source, row_idx, row_text in scored[:top_k]:
+        evidence_rows.append(
+            {
+                "score": score,
+                "source": source,
+                "row_idx": row_idx,
+                "row_text": row_text,
+                "citation": f"[Source: {source}, Row {row_idx}]",
+            }
+        )
+    return evidence_rows
+
+
+def _compute_confidence_score(intent: str, kpis: Dict[str, float], evidence_count: int) -> float:
+    """Compute a simple confidence score for response quality control."""
+
+    required = {
+        "valuation": ["npv", "irr"],
+        "debt_capacity": ["avg_dscr", "min_dscr"],
+        "risk": ["npv"],
+        "scenario": ["npv"],
+        "operational_kpi": ["latest_fcf"],
+        "fundraising_narrative": ["npv", "avg_dscr"],
+    }.get(intent, ["npv"])
+    available_required = sum(1 for key in required if key in kpis)
+    kpi_coverage = available_required / max(len(required), 1)
+    evidence_score = min(evidence_count / 5.0, 1.0)
+    return 0.6 * kpi_coverage + 0.4 * evidence_score
+
+
+def _validate_consistency(
+    kpis: Dict[str, float], sensitivity: Dict[str, float]
+) -> List[str]:
+    """Run basic consistency checks to suppress contradictory narratives."""
+
+    issues: List[str] = []
+    avg_dscr = kpis.get("avg_dscr")
+    min_dscr = kpis.get("min_dscr")
+    if avg_dscr is not None and min_dscr is not None and min_dscr > avg_dscr:
+        issues.append("Minimum DSCR is greater than average DSCR; check DSCR inputs.")
+    p5 = sensitivity.get("price_minus_5pct_npv")
+    p95 = sensitivity.get("price_plus_5pct_npv")
+    if p5 is not None and p95 is not None and p5 > p95:
+        issues.append("Sensitivity ordering appears inverted (P5 greater than P95).")
+    return issues
+
+
+def _run_true_deterministic_sensitivity(
+    assumptions: Assumptions,
+) -> Dict[str, float]:
+    """Run deterministic reruns with shocked assumptions for true sensitivity deltas."""
+
+    base_results = generate_model_outputs(assumptions, analytics_plan=AnalyticsPlan.summary())
+    base_npv = _to_float(base_results.get("valuation", {}).get("npv")) or 0.0
+
+    def _npv_for(**overrides: Any) -> float:
+        shocked = Assumptions(**{**asdict(assumptions), **overrides})
+        out = generate_model_outputs(shocked, analytics_plan=AnalyticsPlan.summary())
+        return _to_float(out.get("valuation", {}).get("npv")) or float("nan")
+
+    price_minus = _npv_for(live_price_per_kg=float(assumptions.live_price_per_kg) * 0.95)
+    price_plus = _npv_for(live_price_per_kg=float(assumptions.live_price_per_kg) * 1.05)
+    cost_plus = _npv_for(feed_cost_per_kg=float(assumptions.feed_cost_per_kg) * 1.05)
+
+    return {
+        "base_npv": base_npv,
+        "price_minus_5pct_npv": price_minus,
+        "price_plus_5pct_npv": price_plus,
+        "cost_plus_5pct_npv": cost_plus,
+    }
 
 
 def _fetch_web_benchmarks(question: str) -> List[str]:
@@ -1627,8 +1697,22 @@ def _answer_model_question(
 
     intent = _classify_question_intent(q)
     kpis = _compute_chat_kpis(context_frames, valuation)
-    sensitivity = _compute_sensitivity_impacts(kpis)
+    sensitivity = _run_true_deterministic_sensitivity(assumptions)
     evidence_rows = _select_evidence_rows(q, context_frames, intent, top_k=5)
+    confidence_score = _compute_confidence_score(intent, kpis, len(evidence_rows))
+    consistency_issues = _validate_consistency(kpis, sensitivity)
+
+    if confidence_score < 0.35:
+        return (
+            "I don’t have enough high-confidence evidence from the current model outputs to answer reliably. "
+            "Please run the relevant simulation blocks (Monte Carlo / break-even / scenario planning) and ask again."
+        )
+    if consistency_issues:
+        issues_text = " ".join(consistency_issues)
+        return (
+            "I detected a model consistency issue and will avoid a potentially misleading conclusion. "
+            f"Please review inputs/results first: {issues_text}"
+        )
 
     recommendation = "Proceed with caution"
     if kpis.get("npv", 0) > 0 and kpis.get("avg_dscr", 0) >= 1.3:
@@ -1659,12 +1743,13 @@ def _answer_model_question(
         f"- NPV if price -5%: {sensitivity['price_minus_5pct_npv']:,.0f}",
         f"- NPV if price +5%: {sensitivity['price_plus_5pct_npv']:,.0f}",
         f"- NPV if costs +5%: {sensitivity['cost_plus_5pct_npv']:,.0f}",
+        f"- Confidence score: {confidence_score:.2f}",
     ]
 
     if evidence_rows:
         parts.append("### Evidence mapping (model tables)")
-        for source, row in evidence_rows:
-            parts.append(f"- [{source}] {row}")
+        for item in evidence_rows:
+            parts.append(f"- {item['citation']} {item['row_text']}")
 
     if rag_chunks:
         rag_hits = _retrieve_relevant_chunks(rag_chunks, q, top_k=2)
@@ -1695,6 +1780,14 @@ def _answer_model_question(
                 "debt-service resilience, downside sensitivity, and execution safeguards."
             ),
         )
+        if intent == "debt_capacity":
+            parts.insert(2, "Debt-capacity focus: assess covenant headroom and refinancing resilience.")
+        elif intent == "risk":
+            parts.insert(2, "Risk focus: evaluate downside tail outcomes and mitigation readiness.")
+        elif intent == "operational_kpi":
+            parts.insert(2, "Operational focus: connect throughput, pricing, and cost controls to value creation.")
+        elif intent == "fundraising_narrative":
+            parts.insert(2, "Fundraising focus: articulate investability, execution plan, and downside protection.")
 
     return "\n".join(parts)
 

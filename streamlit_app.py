@@ -2966,6 +2966,13 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
                 "step": 0.1,
             },
             {
+                "attr": "eggs_per_cycle_default",
+                "label": "Eggs per cycle (default)",
+                "min": 0.0,
+                "max": 200000.0,
+                "step": 100.0,
+            },
+            {
                 "attr": "manure_price_per_ton",
                 "label": "Poultry manure price per ton",
                 "min": 0.0,
@@ -2998,21 +3005,6 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
         defaults,
         values,
         columns=3,
-    )
-    survivors_per_cycle = float(values.get("birds_per_cycle", defaults.birds_per_cycle)) * (
-        1 - float(values.get("mortality_rate", defaults.mortality_rate))
-    )
-    estimated_egg_dozens_per_cycle = max(survivors_per_cycle * 0.06, 0.0)
-    estimated_eggs_per_cycle = estimated_egg_dozens_per_cycle * 12.0
-    egg_info_col1, egg_info_col2 = st.columns(2)
-    egg_info_col1.metric(
-        "Eggs price per dozen (selected)",
-        f"${float(values.get('eggs_price_per_dozen', defaults.eggs_price_per_dozen)):.2f}",
-    )
-    egg_info_col2.metric(
-        "Estimated eggs per cycle",
-        f"{estimated_eggs_per_cycle:,.0f} eggs",
-        help="Derived from surviving birds and the default egg-yield factor used by the revenue template.",
     )
 
     _render_input_section(
@@ -3250,6 +3242,7 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
         discount_rate=float(values["discount_rate"]),
         price_growth=float(values["price_growth"]),
         eggs_price_per_dozen=float(values["eggs_price_per_dozen"]),
+        eggs_per_cycle_default=float(values["eggs_per_cycle_default"]),
         manure_price_per_ton=float(values["manure_price_per_ton"]),
         live_bird_price_per_head=float(values["live_bird_price_per_head"]),
         byproduct_price_per_kg=float(values["byproduct_price_per_kg"]),

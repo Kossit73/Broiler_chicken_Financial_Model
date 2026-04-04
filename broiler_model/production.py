@@ -234,6 +234,7 @@ def build_revenue_schedules(
     fallback_survivors = round(
         assumptions.birds_per_cycle * (1 - assumptions.mortality_rate)
     )
+    eggs_default_dozens = max(float(assumptions.eggs_per_cycle_default) / 12.0, 0.0)
     fallback_live_weight_kg = fallback_survivors * assumptions.final_weight_kg
 
     for category in REVENUE_CATEGORIES[1:]:
@@ -245,7 +246,9 @@ def build_revenue_schedules(
             cycle = cycle_by_number.get(cycle_number)
             survivors = cycle.survivors if cycle else fallback_survivors
             live_weight_kg = cycle.live_weight_kg if cycle else fallback_live_weight_kg
-            if category == "By-Product (feathers, offal, livers) Revenue":
+            if category == "Eggs Revenue":
+                units = eggs_default_dozens
+            elif category == "By-Product (feathers, offal, livers) Revenue":
                 units = live_weight_kg * yield_value
             else:
                 units = survivors * yield_value

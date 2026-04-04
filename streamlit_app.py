@@ -985,15 +985,39 @@ def _generate_business_plan_pdf_bytes(
     return output.getvalue()
 
 
-def _extract_text_from_upload(uploaded_file: Any) -> str:
-    """Extract text from uploaded files supporting txt/md/pdf/docx."""
+def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[str]]:
+    """Extract text from uploaded files and return (text, parser_used, error_message)."""
 
     file_name = getattr(uploaded_file, "name", "document")
     suffix = file_name.lower().split(".")[-1] if "." in file_name else ""
     file_bytes = uploaded_file.getvalue()
 
-    if suffix in {"txt", "md"}:
-        return file_bytes.decode("utf-8", errors="ignore")
+    if suffix in {"txt", "md", "log"}:
+        return file_bytes.decode("utf-8", errors="ignore"), "plain-text", None
+
+    if suffix in {"csv", "tsv"}:
+        delimiter = "\t" if suffix == "tsv" else ","
+        try:
+            decoded = file_bytes.decode("utf-8", errors="ignore")
+            lines = decoded.splitlines()
+            if not lines:
+                return "", "csv", "File is empty"
+            return decoded, f"delimited({delimiter})", None
+        except Exception as exc:
+            return "", "delimited", str(exc)
+
+    if suffix in {"json"}:
+        try:
+            obj = json.loads(file_bytes.decode("utf-8", errors="ignore"))
+            return json.dumps(obj, indent=2), "json", None
+        except Exception as exc:
+            return "", "json", str(exc)
+
+    if suffix in {"html", "htm", "xml"}:
+        text = file_bytes.decode("utf-8", errors="ignore")
+        cleaned = re.sub(r"<[^>]+>", " ", text)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned, "markup-strip", None
 
     if suffix == "pdf":
         reader_cls = None
@@ -1014,7 +1038,7 @@ def _extract_text_from_upload(uploaded_file: Any) -> str:
                 pages = [page.extract_text() or "" for page in reader.pages]
                 extracted = "\n".join(pages).strip()
                 if extracted:
-                    return extracted
+                    return extracted, getattr(reader_cls, "__module__", "pdf-reader"), None
             except Exception:
                 pass
 
@@ -1025,20 +1049,59 @@ def _extract_text_from_upload(uploaded_file: Any) -> str:
                 pages = [(page.extract_text() or "") for page in pdf.pages]
             extracted = "\n".join(pages).strip()
             if extracted:
-                return extracted
+                return extracted, "pdfplumber", None
         except Exception:
             pass
-        return ""
+        return "", "pdf", "No PDF parser could extract text (pypdf/PyPDF2/pdfplumber)."
 
     if suffix == "docx":
         try:
             from docx import Document  # type: ignore
         except ImportError:
-            return ""
+            return "", "docx", "python-docx is not installed"
         document = Document(BytesIO(file_bytes))
-        return "\n".join(p.text for p in document.paragraphs if p.text.strip())
+        return (
+            "\n".join(p.text for p in document.paragraphs if p.text.strip()),
+            "python-docx",
+            None,
+        )
 
-    return ""
+    if suffix in {"xlsx", "xlsm", "xltx", "xltm"}:
+        try:
+            from openpyxl import load_workbook  # type: ignore
+
+            workbook = load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
+            lines: List[str] = []
+            for sheet in workbook.worksheets:
+                lines.append(f"[Sheet: {sheet.title}]")
+                for row in sheet.iter_rows(values_only=True):
+                    values = [str(cell) for cell in row if cell is not None and str(cell).strip()]
+                    if values:
+                        lines.append(" | ".join(values))
+            return "\n".join(lines).strip(), "openpyxl", None
+        except Exception as exc:
+            return "", "openpyxl", str(exc)
+
+    if suffix == "pptx":
+        try:
+            from pptx import Presentation  # type: ignore
+
+            prs = Presentation(BytesIO(file_bytes))
+            lines = []
+            for idx, slide in enumerate(prs.slides, start=1):
+                lines.append(f"[Slide {idx}]")
+                for shape in slide.shapes:
+                    text = getattr(shape, "text", "")
+                    if text and text.strip():
+                        lines.append(text.strip())
+            return "\n".join(lines).strip(), "python-pptx", None
+        except Exception as exc:
+            return "", "pptx", str(exc)
+
+    fallback = file_bytes.decode("utf-8", errors="ignore").strip()
+    if fallback:
+        return fallback, "fallback-utf8", None
+    return "", "unknown", "Unsupported or binary file format with no text parser available."
 
 
 def _chunk_document_text(
@@ -3913,7 +3976,7 @@ def main() -> None:
         )
         uploaded_docs = st.file_uploader(
             "Upload research documents",
-            type=["pdf", "docx", "txt", "md"],
+            type=["pdf", "docx", "txt", "md", "csv", "tsv", "xlsx", "xlsm", "json", "html", "xml", "pptx"],
             accept_multiple_files=True,
             key=f"rag_upload_{selected_scenario}",
         )
@@ -3925,12 +3988,25 @@ def main() -> None:
         ):
             documents: List[Dict[str, Any]] = []
             all_chunks: List[Dict[str, Any]] = []
+            parse_diagnostics: List[Dict[str, Any]] = []
             for uploaded in uploaded_docs or []:
-                extracted = _extract_text_from_upload(uploaded)
+                extracted, parser_used, parse_error = _extract_text_from_upload(uploaded)
                 if not extracted.strip():
                     st.warning(
                         f"Could not parse text for `{uploaded.name}`. "
-                        "Install optional parser dependencies for this format if needed."
+                        f"Parser: {parser_used}. "
+                        f"{parse_error or 'Install optional parser dependencies for this format if needed.'}"
+                    )
+                    parse_diagnostics.append(
+                        {
+                            "File": uploaded.name,
+                            "Type": uploaded.name.split(".")[-1].lower() if "." in uploaded.name else "",
+                            "Parser": parser_used,
+                            "Characters": 0,
+                            "Chunks": 0,
+                            "Status": "Failed",
+                            "Error": parse_error or "No text extracted",
+                        }
                     )
                     continue
                 doc_record = {
@@ -3938,7 +4014,19 @@ def main() -> None:
                     "char_count": len(extracted),
                 }
                 documents.append(doc_record)
-                all_chunks.extend(_chunk_document_text(uploaded.name, extracted))
+                new_chunks = _chunk_document_text(uploaded.name, extracted)
+                all_chunks.extend(new_chunks)
+                parse_diagnostics.append(
+                    {
+                        "File": uploaded.name,
+                        "Type": uploaded.name.split(".")[-1].lower() if "." in uploaded.name else "",
+                        "Parser": parser_used,
+                        "Characters": len(extracted),
+                        "Chunks": len(new_chunks),
+                        "Status": "Indexed",
+                        "Error": "",
+                    }
+                )
             rag_store[selected_scenario] = {
                 "documents": documents,
                 "chunks": all_chunks,
@@ -3947,6 +4035,9 @@ def main() -> None:
             st.success(
                 f"Indexed {len(documents)} document(s) into {len(all_chunks)} chunk(s)."
             )
+            if parse_diagnostics:
+                st.markdown("#### Indexing diagnostics")
+                st.dataframe(pd.DataFrame(parse_diagnostics), use_container_width=True, hide_index=True)
 
         rag_docs = rag_store.get(selected_scenario, {}).get("documents", [])
         rag_chunks = rag_store.get(selected_scenario, {}).get("chunks", [])

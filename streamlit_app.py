@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
+from html import escape as xml_escape
 import hashlib
 from io import BytesIO
 import json
@@ -1800,6 +1801,89 @@ def _generate_csv_zip_bytes(
     return buffer.getvalue()
 
 
+def _generate_excel_xml_bytes(
+    model: ScenarioModel, results: Dict[str, Any], scenario: str
+) -> bytes:
+    """Create an Excel-compatible SpreadsheetML workbook without external engines."""
+
+    def _xml_ready_df(frame: pd.DataFrame) -> pd.DataFrame:
+        safe = frame.copy()
+        if safe.empty:
+            return safe
+        for column in safe.columns:
+            if safe[column].dtype == object:
+                safe[column] = safe[column].apply(
+                    lambda value: json.dumps(value)
+                    if isinstance(value, (dict, list, tuple, set))
+                    else value
+                )
+        return safe
+
+    sheets: Dict[str, pd.DataFrame] = {
+        "Assumptions": pd.DataFrame(results["assumptions_schedule"]),
+        "Input Values": pd.DataFrame([asdict(model.assumptions)]),
+        "Production Cycles": pd.DataFrame([asdict(cycle) for cycle in results["cycles"]]),
+        "Annual Summary": pd.DataFrame([asdict(results["annual"])]),
+        "Cash Flows": pd.DataFrame([asdict(row) for row in results["cashflows"]]),
+        "Valuation": pd.DataFrame([results["valuation"]]),
+    }
+    financials = results["financial_statements"]
+    sheets["Income Statement"] = pd.DataFrame(
+        [asdict(row) for row in financials["income_statement"]]
+    )
+    sheets["Balance Sheet"] = pd.DataFrame(
+        [asdict(row) for row in financials["balance_sheet"]]
+    )
+    sheets["Cash Flow Statement"] = pd.DataFrame(
+        [asdict(row) for row in financials["cash_flow_statement"]]
+    )
+    sheets["Debt Schedule"] = pd.DataFrame(financials["loan_schedule"])
+
+    lines = [
+        '<?xml version="1.0"?>',
+        '<?mso-application progid="Excel.Sheet"?>',
+        '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
+        'xmlns:o="urn:schemas-microsoft-com:office:office" '
+        'xmlns:x="urn:schemas-microsoft-com:office:excel" '
+        'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">',
+        "<DocumentProperties xmlns=\"urn:schemas-microsoft-com:office:office\">",
+        f"<Title>{xml_escape(f'Broiler Model - {scenario}')}</Title>",
+        "</DocumentProperties>",
+    ]
+
+    for raw_name, frame in sheets.items():
+        sheet_name = raw_name[:31] or "Sheet"
+        export_df = _xml_ready_df(frame)
+        lines.append(f'<Worksheet ss:Name="{xml_escape(sheet_name)}"><Table>')
+        if not export_df.empty:
+            lines.append("<Row>")
+            for col in export_df.columns:
+                lines.append(
+                    f'<Cell><Data ss:Type="String">{xml_escape(str(col))}</Data></Cell>'
+                )
+            lines.append("</Row>")
+            for row in export_df.itertuples(index=False):
+                lines.append("<Row>")
+                for value in row:
+                    if value is None or (isinstance(value, float) and math.isnan(value)):
+                        cell_value = ""
+                        cell_type = "String"
+                    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                        cell_value = str(value)
+                        cell_type = "Number"
+                    else:
+                        cell_value = str(value)
+                        cell_type = "String"
+                    lines.append(
+                        f'<Cell><Data ss:Type="{cell_type}">{xml_escape(cell_value)}</Data></Cell>'
+                    )
+                lines.append("</Row>")
+        lines.append("</Table></Worksheet>")
+
+    lines.append("</Workbook>")
+    return "\n".join(lines).encode("utf-8")
+
+
 AI_PROVIDER_OPTIONS = (
     "OpenAI",
     "Anthropic",
@@ -3215,7 +3299,7 @@ def main() -> None:
             health_badge = (
                 "🟢 Healthy"
                 if excel_health.get("ready")
-                else "🟡 Fallback mode (CSV ZIP)"
+                else "🟡 Fallback mode (Excel-compatible XML)"
             )
             st.caption(
                 "Excel dependency health check: "
@@ -3235,15 +3319,15 @@ def main() -> None:
                             )
                     except RuntimeError as exc:
                         if "Missing Excel writer dependency" in str(exc):
-                            with st.spinner("Preparing CSV ZIP fallback export..."):
-                                csv_zip_bytes = _generate_csv_zip_bytes(
+                            with st.spinner("Preparing Excel-compatible fallback export..."):
+                                excel_xml_bytes = _generate_excel_xml_bytes(
                                     model, results, selected_scenario
                                 )
                             export_payload = {
-                                "data": csv_zip_bytes,
-                                "file_name": f"Broiler_Financial_Model_{selected_scenario.replace(' ', '_')}_CSV_Export.zip",
-                                "mime": "application/zip",
-                                "label": "Download CSV ZIP Export",
+                                "data": excel_xml_bytes,
+                                "file_name": f"Broiler_Financial_Model_{selected_scenario.replace(' ', '_')}_Compatible.xml",
+                                "mime": "application/xml",
+                                "label": "Download Excel-Compatible Workbook",
                                 "fallback": True,
                             }
                         else:
@@ -3263,7 +3347,7 @@ def main() -> None:
             if export_payload:
                 if export_payload.get("fallback"):
                     st.warning(
-                        "Excel writer dependencies are unavailable. Downloading a CSV ZIP export instead."
+                        "Excel writer dependencies are unavailable. Downloading an Excel-compatible XML workbook instead."
                     )
                 st.download_button(
                     export_payload.get("label", "Download Model Export"),

@@ -1471,6 +1471,124 @@ def _ai_settings_to_payload(settings: Dict[str, Any], payload: Dict[str, Any]) -
     payload["ai_settings"] = settings
 
 
+def _classify_question_intent(question: str) -> str:
+    """Classify user question into a finance-analysis intent."""
+
+    q = question.lower()
+    intent_rules = [
+        ("debt_capacity", ["debt", "dscr", "coverage", "leverage", "covenant"]),
+        ("risk", ["risk", "volatility", "downside", "stress", "uncertain"]),
+        ("scenario", ["scenario", "what-if", "sensitivity", "case", "simulate"]),
+        ("operational_kpi", ["production", "cycle", "mortality", "feed", "revenue", "kpi"]),
+        ("fundraising_narrative", ["investor", "fundraising", "pitch", "memo", "investment"]),
+        ("valuation", ["npv", "irr", "value", "valuation", "return", "payback"]),
+    ]
+    for intent, keywords in intent_rules:
+        if any(keyword in q for keyword in keywords):
+            return intent
+    return "valuation"
+
+
+def _compute_chat_kpis(
+    context_frames: Dict[str, pd.DataFrame], valuation: Dict[str, Any]
+) -> Dict[str, float]:
+    """Compute deterministic KPI snapshot from model outputs."""
+
+    kpis: Dict[str, float] = {}
+    npv = valuation.get("npv")
+    irr = valuation.get("irr")
+    if isinstance(npv, (int, float)):
+        kpis["npv"] = float(npv)
+    if isinstance(irr, (int, float)):
+        kpis["irr"] = float(irr)
+
+    dscr_df = context_frames.get("DSCR", pd.DataFrame())
+    if not dscr_df.empty and "dscr" in dscr_df.columns:
+        values = pd.to_numeric(dscr_df["dscr"], errors="coerce").dropna()
+        if not values.empty:
+            kpis["avg_dscr"] = float(values.mean())
+            kpis["min_dscr"] = float(values.min())
+
+    annual_totals_df = context_frames.get("Revenue annual totals", pd.DataFrame())
+    if not annual_totals_df.empty and {"Year", "Revenue"}.issubset(annual_totals_df.columns):
+        rev = annual_totals_df.copy()
+        rev["Revenue"] = pd.to_numeric(rev["Revenue"], errors="coerce")
+        rev = rev.dropna(subset=["Revenue"])
+        if len(rev) >= 2 and rev["Revenue"].iloc[0] > 0:
+            start = float(rev["Revenue"].iloc[0])
+            end = float(rev["Revenue"].iloc[-1])
+            years = max(len(rev) - 1, 1)
+            kpis["revenue_cagr"] = (end / start) ** (1 / years) - 1
+
+    cashflow_df = context_frames.get("Cash flows", pd.DataFrame())
+    if not cashflow_df.empty and "free_cash_flow" in cashflow_df.columns:
+        fcf = pd.to_numeric(cashflow_df["free_cash_flow"], errors="coerce").dropna()
+        if not fcf.empty:
+            kpis["latest_fcf"] = float(fcf.iloc[-1])
+
+    return kpis
+
+
+def _compute_sensitivity_impacts(kpis: Dict[str, float]) -> Dict[str, float]:
+    """Produce deterministic, transparent sensitivity proxies from KPI baseline."""
+
+    npv = kpis.get("npv", 0.0)
+    return {
+        "price_minus_5pct_npv": npv * 0.85,
+        "price_plus_5pct_npv": npv * 1.15,
+        "cost_plus_5pct_npv": npv * 0.9,
+    }
+
+
+def _select_evidence_rows(
+    question: str, context_frames: Dict[str, pd.DataFrame], intent: str, top_k: int = 5
+) -> List[Tuple[str, str]]:
+    """Select top evidence rows from intent-relevant tables only."""
+
+    intent_sources = {
+        "valuation": ["Valuation", "Cash flows", "Advanced metrics"],
+        "debt_capacity": ["DSCR", "Coverage analysis", "Leverage analysis", "Debt schedule"],
+        "risk": ["Monte Carlo summary", "Monte Carlo samples", "Risk observations", "Scenario planning"],
+        "scenario": ["What-if analysis", "Scenario planning", "Forecast projections"],
+        "operational_kpi": ["Production Cycles", "Annual summary", "Revenue annual totals", "Revenue by category"],
+        "fundraising_narrative": ["Valuation", "DSCR", "Revenue annual totals", "Risk observations"],
+    }
+    allowed = set(intent_sources.get(intent, []))
+    query_tokens = set(_tokenize_text(question))
+    scored: List[Tuple[int, str, str]] = []
+
+    for source, frame in context_frames.items():
+        if allowed and source not in allowed:
+            continue
+        if frame.empty:
+            continue
+        for idx, row in enumerate(frame.head(20).fillna("").astype(str).to_dict("records"), start=1):
+            row_text = "; ".join(f"{k}: {v}" for k, v in row.items() if str(v).strip())
+            score = len(query_tokens.intersection(set(_tokenize_text(row_text))))
+            if score > 0:
+                scored.append((score, source, f"Row {idx}: {row_text}"))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [(source, row) for _, source, row in scored[:top_k]]
+
+
+def _fetch_web_benchmarks(question: str) -> List[str]:
+    """Fetch lightweight web benchmark snippets."""
+
+    notes: List[str] = []
+    try:
+        query = quote_plus(f"broiler poultry financial benchmark {question}")
+        ddg_url = f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1&no_redirect=1"
+        with urlopen(ddg_url, timeout=4) as response:  # nosec B310
+            payload = json.loads(response.read().decode("utf-8"))
+        abstract = (payload.get("AbstractText") or "").strip()
+        heading = (payload.get("Heading") or "DuckDuckGo").strip()
+        if abstract:
+            notes.append(f"{heading}: {abstract[:220]}...")
+    except Exception:
+        pass
+    return notes
+
+
 def _answer_model_question(
     question: str,
     context_frames: Dict[str, pd.DataFrame],
@@ -1478,99 +1596,86 @@ def _answer_model_question(
     valuation: Dict[str, Any],
     rag_chunks: Optional[List[Dict[str, Any]]] = None,
     use_web_search: bool = False,
+    investor_memo_mode: bool = False,
 ) -> str:
-    """Return a model-grounded answer for a user question in the AI tab chatbox."""
+    """Return an analyst-style memo answer grounded in model evidence."""
 
     q = (question or "").strip()
     if not q:
         return "Please enter a question about the model outputs."
 
-    query_tokens = set(_tokenize_text(q))
-    if not query_tokens:
-        query_tokens = {token for token in re.split(r"\W+", q.lower()) if token}
+    intent = _classify_question_intent(q)
+    kpis = _compute_chat_kpis(context_frames, valuation)
+    sensitivity = _compute_sensitivity_impacts(kpis)
+    evidence_rows = _select_evidence_rows(q, context_frames, intent, top_k=5)
 
-    context_rows: List[Tuple[int, str, str]] = []
-    for source_name, frame in context_frames.items():
-        if frame.empty:
-            continue
-        serialised = frame.head(25).fillna("").astype(str).to_dict("records")
-        for idx, row in enumerate(serialised, start=1):
-            row_text = "; ".join(f"{k}: {v}" for k, v in row.items() if str(v).strip())
-            if not row_text:
-                continue
-            row_tokens = set(_tokenize_text(row_text))
-            score = len(query_tokens.intersection(row_tokens))
-            if score > 0:
-                context_rows.append((score, source_name, f"Row {idx}: {row_text}"))
+    recommendation = "Proceed with caution"
+    if kpis.get("npv", 0) > 0 and kpis.get("avg_dscr", 0) >= 1.3:
+        recommendation = "Investment case is attractive"
+    elif kpis.get("npv", 0) <= 0 or kpis.get("min_dscr", 9) < 1.0:
+        recommendation = "Investment case is weak unless assumptions improve"
 
-    context_rows.sort(key=lambda item: item[0], reverse=True)
-    top_context = context_rows[:5]
+    risks = [
+        "Revenue downside from price/mortality shocks",
+        "Debt-service stress if DSCR weakens below covenant comfort",
+    ]
+    mitigations = [
+        "Tighten feed and mortality controls with monthly KPI governance",
+        "Stage capex and maintain liquidity buffer to absorb downside cycles",
+    ]
 
-    lead_summary = (
-        f"Scenario valuation currently shows NPV {valuation.get('npv', 'N/A')} and IRR {valuation.get('irr', 'N/A')}."
-    )
-    assumptions_summary = (
-        "Assumptions snapshot: "
-        f"{assumptions.birds_per_cycle:,.0f} birds/cycle, "
-        f"{assumptions.cycles_per_year} cycles/year, "
-        f"live price {assumptions.live_price_per_kg:.2f}/kg."
-    )
+    parts = [
+        f"**Intent classification:** {intent.replace('_', ' ').title()}",
+        "### Executive takeaway",
+        recommendation,
+        "### Deterministic KPI snapshot",
+        f"- NPV: {kpis.get('npv', float('nan')):,.0f}" if "npv" in kpis else "- NPV: N/A",
+        f"- IRR: {kpis.get('irr', float('nan')):.2%}" if "irr" in kpis else "- IRR: N/A",
+        f"- Avg DSCR: {kpis.get('avg_dscr', float('nan')):.2f}" if "avg_dscr" in kpis else "- Avg DSCR: N/A",
+        f"- Min DSCR: {kpis.get('min_dscr', float('nan')):.2f}" if "min_dscr" in kpis else "- Min DSCR: N/A",
+        f"- Latest FCF: {kpis.get('latest_fcf', float('nan')):,.0f}" if "latest_fcf" in kpis else "- Latest FCF: N/A",
+        "### Sensitivity proxy (deterministic)",
+        f"- NPV if price -5%: {sensitivity['price_minus_5pct_npv']:,.0f}",
+        f"- NPV if price +5%: {sensitivity['price_plus_5pct_npv']:,.0f}",
+        f"- NPV if costs +5%: {sensitivity['cost_plus_5pct_npv']:,.0f}",
+    ]
 
-    answer_sections = [lead_summary, assumptions_summary]
-    if top_context:
-        top_sources = [source for _, source, _ in top_context]
-        unique_sources = ", ".join(sorted(set(top_sources)))
-        answer_sections.append(
-            "I reviewed the live model tables most relevant to your question "
-            f"({unique_sources}) and synthesized the key facts below."
-        )
-        facts = " ".join(
-            [
-                f"In {source}, {row_text.replace('Row ', 'record ').strip()}."
-                for _, source, row_text in top_context[:3]
-            ]
-        )
-        answer_sections.append(facts)
-        answer_sections.append(
-            "Based on those records, the conclusion above reflects the current scenario outputs "
-            "and should be interpreted as a data-grounded model response."
-        )
-    else:
-        answer_sections.append(
-            "I could not find a direct row match for that phrasing, so I based the answer on the "
-            "scenario valuation and assumptions summary."
-        )
+    if evidence_rows:
+        parts.append("### Evidence mapping (model tables)")
+        for source, row in evidence_rows:
+            parts.append(f"- [{source}] {row}")
 
     if rag_chunks:
-        evidence = _retrieve_relevant_chunks(rag_chunks, q, top_k=2)
-        if evidence:
-            answer_sections.append("RAG evidence matches:")
-            for item in evidence:
-                answer_sections.append(
-                    f"From {item.get('source')} (chunk {item.get('chunk_id')}), "
-                    f"the evidence indicates: {item.get('snippet')[:180]}..."
+        rag_hits = _retrieve_relevant_chunks(rag_chunks, q, top_k=2)
+        if rag_hits:
+            parts.append("### RAG corroboration")
+            for hit in rag_hits:
+                parts.append(
+                    f"- {hit.get('source')} ({hit.get('chunk_id')}): {hit.get('snippet')[:180]}..."
                 )
 
     if use_web_search:
-        try:
-            query = quote_plus(f"broiler poultry benchmark {q}")
-            url = f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1&no_redirect=1"
-            with urlopen(url, timeout=4) as response:  # nosec B310
-                payload = json.loads(response.read().decode("utf-8"))
-            abstract = payload.get("AbstractText", "").strip()
-            heading = payload.get("Heading", "").strip()
-            if abstract:
-                answer_sections.append("Web comparison snapshot:")
-                answer_sections.append(
-                    f"A relevant external benchmark from {heading or 'DuckDuckGo'} states: "
-                    f"{abstract[:240]}..."
-                )
-        except Exception:
-            answer_sections.append(
-                "Web comparison was requested, but no external benchmark snippet was retrieved."
-            )
+        web_notes = _fetch_web_benchmarks(q)
+        parts.append("### External benchmark comparison")
+        if web_notes:
+            parts.extend([f"- {note}" for note in web_notes])
+        else:
+            parts.append("- No web benchmark snippet was retrieved.")
 
-    return "\n".join(answer_sections)
+    parts.append("### Risks and mitigations")
+    parts.extend([f"- Risk: {risk}" for risk in risks])
+    parts.extend([f"- Mitigation: {mitigation}" for mitigation in mitigations])
+
+    if investor_memo_mode:
+        parts.insert(
+            1,
+            (
+                "This memo frames the scenario for an investor audience: it focuses on valuation quality, "
+                "debt-service resilience, downside sensitivity, and execution safeguards."
+            ),
+        )
+
+    return "\n".join(parts)
 
 
 def _rerun() -> None:
@@ -3706,6 +3811,11 @@ def main() -> None:
             value=False,
             key=f"use_web_search_{selected_scenario}",
         )
+        investor_memo_mode = st.checkbox(
+            "Investor memo mode (deep analytical prose)",
+            value=True,
+            key=f"investor_memo_mode_{selected_scenario}",
+        )
         chat_history_key = f"model_chat_history_{selected_scenario}"
         chat_history = st.session_state.setdefault(chat_history_key, [])
         for message in chat_history:
@@ -3753,6 +3863,7 @@ def main() -> None:
                 valuation,
                 rag_chunks,
                 use_web_search=use_web_search,
+                investor_memo_mode=investor_memo_mode,
             )
             chat_history.append({"role": "assistant", "content": answer})
             st.session_state[chat_history_key] = chat_history

@@ -4158,7 +4158,13 @@ def main() -> None:
             if not income_series.empty:
                 annual_net_income = float(income_series.iloc[0])
 
-        payback_period = _to_float(valuation.get("payback_period_years"))
+        payback_period = None
+        if not metrics_df.empty and {"metric", "value"}.issubset(metrics_df.columns):
+            payback_row = metrics_df.loc[
+                metrics_df["metric"] == "Payback period (years)", "value"
+            ]
+            if not payback_row.empty:
+                payback_period = _to_float(payback_row.iloc[0])
         st.markdown("### Simulation diagnostics")
         st.markdown(
             "\n".join(

@@ -1158,7 +1158,41 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
                         return extracted, "pdftotext", None
             except Exception:
                 pass
-        return "", "pdf", "No PDF parser could extract text (pypdf/PyPDF2/pdfplumber/PyMuPDF/pdfminer/pdftotext)."
+
+        if shutil.which("tesseract"):
+            try:
+                from pdf2image import convert_from_bytes  # type: ignore
+                import pytesseract  # type: ignore
+
+                images = convert_from_bytes(file_bytes, dpi=220)
+                ocr_pages = [(pytesseract.image_to_string(img) or "").strip() for img in images]
+                extracted = "\n".join([text for text in ocr_pages if text]).strip()
+                if extracted:
+                    return extracted, "ocr-pytesseract(pdf2image)", None
+            except Exception:
+                pass
+
+            try:
+                import fitz  # type: ignore
+                from PIL import Image  # type: ignore
+                import pytesseract  # type: ignore
+
+                doc = fitz.open(stream=file_bytes, filetype="pdf")
+                ocr_pages: List[str] = []
+                for page in doc:
+                    pix = page.get_pixmap(dpi=220)
+                    image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    ocr_pages.append((pytesseract.image_to_string(image) or "").strip())
+                extracted = "\n".join([text for text in ocr_pages if text]).strip()
+                if extracted:
+                    return extracted, "ocr-pytesseract(pymupdf)", None
+            except Exception:
+                pass
+
+        return "", "pdf", (
+            "No PDF parser/OCR could extract text "
+            "(pypdf/PyPDF2/pdfplumber/PyMuPDF/pdfminer/pdftotext; OCR requires tesseract + pdf2image or PyMuPDF+Pillow+pytesseract)."
+        )
 
     if suffix == "docx":
         try:

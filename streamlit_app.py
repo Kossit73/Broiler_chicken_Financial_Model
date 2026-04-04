@@ -10,6 +10,8 @@ from io import BytesIO
 import json
 import math
 import re
+from urllib.parse import quote_plus
+from urllib.request import urlopen
 import zipfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple, get_type_hints
 
@@ -1421,14 +1423,11 @@ def _ai_settings_to_payload(settings: Dict[str, Any], payload: Dict[str, Any]) -
 
 def _answer_model_question(
     question: str,
+    context_frames: Dict[str, pd.DataFrame],
     assumptions: Assumptions,
     valuation: Dict[str, Any],
-    annual_df: pd.DataFrame,
-    cashflow_df: pd.DataFrame,
-    dscr_df: pd.DataFrame,
-    break_even_df: pd.DataFrame,
-    scorecard_df: pd.DataFrame,
     rag_chunks: Optional[List[Dict[str, Any]]] = None,
+    use_web_search: bool = False,
 ) -> str:
     """Return a model-grounded answer for a user question in the AI tab chatbox."""
 
@@ -1436,94 +1435,76 @@ def _answer_model_question(
     if not q:
         return "Please enter a question about the model outputs."
 
-    q_lower = q.lower()
-    npv = valuation.get("npv")
-    irr = valuation.get("irr")
+    query_tokens = set(_tokenize_text(q))
+    if not query_tokens:
+        query_tokens = {token for token in re.split(r"\W+", q.lower()) if token}
 
-    annual_revenue = None
-    if not annual_df.empty and "total_revenue" in annual_df.columns:
-        annual_revenue = pd.to_numeric(annual_df["total_revenue"], errors="coerce").dropna()
-    avg_revenue = (
-        float(annual_revenue.mean())
-        if annual_revenue is not None and not annual_revenue.empty
-        else None
+    context_rows: List[Tuple[int, str, str]] = []
+    for source_name, frame in context_frames.items():
+        if frame.empty:
+            continue
+        serialised = frame.head(25).fillna("").astype(str).to_dict("records")
+        for idx, row in enumerate(serialised, start=1):
+            row_text = "; ".join(f"{k}: {v}" for k, v in row.items() if str(v).strip())
+            if not row_text:
+                continue
+            row_tokens = set(_tokenize_text(row_text))
+            score = len(query_tokens.intersection(row_tokens))
+            if score > 0:
+                context_rows.append((score, source_name, f"Row {idx}: {row_text}"))
+
+    context_rows.sort(key=lambda item: item[0], reverse=True)
+    top_context = context_rows[:5]
+
+    lead_summary = (
+        f"Scenario valuation currently shows NPV {valuation.get('npv', 'N/A')} and IRR {valuation.get('irr', 'N/A')}."
+    )
+    assumptions_summary = (
+        "Assumptions snapshot: "
+        f"{assumptions.birds_per_cycle:,.0f} birds/cycle, "
+        f"{assumptions.cycles_per_year} cycles/year, "
+        f"live price {assumptions.live_price_per_kg:.2f}/kg."
     )
 
-    avg_dscr = None
-    if not dscr_df.empty and "dscr" in dscr_df.columns:
-        dscr_values = pd.to_numeric(dscr_df["dscr"], errors="coerce").dropna()
-        if not dscr_values.empty:
-            avg_dscr = float(dscr_values.mean())
-
-    latest_fcf = None
-    if not cashflow_df.empty and "free_cash_flow" in cashflow_df.columns:
-        fcf_values = pd.to_numeric(cashflow_df["free_cash_flow"], errors="coerce").dropna()
-        if not fcf_values.empty:
-            latest_fcf = float(fcf_values.iloc[-1])
-
-    break_even_price = None
-    if not break_even_df.empty and "break_even_live_price_per_kg" in break_even_df.columns:
-        be_values = pd.to_numeric(
-            break_even_df["break_even_live_price_per_kg"], errors="coerce"
-        ).dropna()
-        if not be_values.empty:
-            break_even_price = float(be_values.iloc[-1])
-
-    if any(token in q_lower for token in ["npv", "irr", "valuation", "return"]):
-        return (
-            f"Valuation snapshot: NPV is {npv:,.0f} USD and IRR is {irr:.2%}. "
-            f"Average annual revenue is {avg_revenue:,.0f} USD."
-            if npv is not None and irr is not None and avg_revenue is not None
-            else "I could not compute complete valuation metrics from the current outputs."
+    answer_sections = [lead_summary, assumptions_summary]
+    if top_context:
+        answer_sections.append("Most relevant live model rows:")
+        answer_sections.extend(
+            [f"- [{source}] {row_text}" for _, source, row_text in top_context]
         )
-    if any(token in q_lower for token in ["dscr", "debt", "coverage"]):
-        return (
-            f"Debt-service view: average DSCR is {avg_dscr:.2f}. "
-            f"Latest projected free cash flow is {latest_fcf:,.0f} USD."
-            if avg_dscr is not None and latest_fcf is not None
-            else "I could not derive DSCR/cash-flow metrics from the current tables."
-        )
-    if any(token in q_lower for token in ["break-even", "breakeven", "price"]):
-        if break_even_price is None:
-            return "Break-even live price is not available in the current scenario outputs."
-        buffer_to_live = assumptions.live_price_per_kg - break_even_price
-        return (
-            f"Break-even live price is {break_even_price:.2f} per kg. "
-            f"Current live price is {assumptions.live_price_per_kg:.2f} per kg, "
-            f"so the buffer is {buffer_to_live:.2f} per kg."
-        )
-    if any(token in q_lower for token in ["assumption", "input", "parameter"]):
-        return (
-            "Key assumptions include "
-            f"{assumptions.birds_per_cycle:,.0f} birds/cycle, "
-            f"{assumptions.cycles_per_year} cycles/year, "
-            f"FCR {assumptions.feed_conversion_ratio:.2f}, "
-            f"mortality {assumptions.mortality_rate:.2%}, "
-            f"and live price {assumptions.live_price_per_kg:.2f}/kg."
+    else:
+        answer_sections.append(
+            "I could not find a direct row match, but I can still answer using full model summaries."
         )
 
     if rag_chunks:
         evidence = _retrieve_relevant_chunks(rag_chunks, q, top_k=2)
         if evidence:
-            lead = evidence[0]
-            return (
-                "I found relevant evidence in your RAG library. "
-                f"Top source: {lead.get('source')} (chunk {lead.get('chunk_id')}). "
-                "You can use 'Rewrite using RAG evidence' to inject citations into the business plan."
+            answer_sections.append("RAG evidence matches:")
+            for item in evidence:
+                answer_sections.append(
+                    f"- {item.get('source')} (chunk {item.get('chunk_id')}): {item.get('snippet')[:180]}..."
+                )
+
+    if use_web_search:
+        try:
+            query = quote_plus(f"broiler poultry benchmark {q}")
+            url = f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1&no_redirect=1"
+            with urlopen(url, timeout=4) as response:  # nosec B310
+                payload = json.loads(response.read().decode("utf-8"))
+            abstract = payload.get("AbstractText", "").strip()
+            heading = payload.get("Heading", "").strip()
+            if abstract:
+                answer_sections.append("Web comparison snapshot:")
+                answer_sections.append(
+                    f"- {heading or 'DuckDuckGo'}: {abstract[:240]}..."
+                )
+        except Exception:
+            answer_sections.append(
+                "Web comparison was requested, but no external benchmark snippet was retrieved."
             )
 
-    top_signals: List[str] = []
-    if not scorecard_df.empty:
-        for _, row in scorecard_df.head(3).iterrows():
-            top_signals.append(
-                f"{row.get('Metric')}: {row.get('Status')} ({row.get('Value')})"
-            )
-    signals_text = "; ".join(top_signals) if top_signals else "No scorecard signals available."
-    return (
-        "I can answer questions about valuation, DSCR/debt-service, break-even pricing, "
-        "assumptions, and RAG evidence. "
-        f"Current quick signals: {signals_text}"
-    )
+    return "\n".join(answer_sections)
 
 
 def _rerun() -> None:
@@ -3524,6 +3505,11 @@ def main() -> None:
         st.caption(
             "Ask questions about assumptions, valuation, statements, cash flow, and risk metrics."
         )
+        use_web_search = st.checkbox(
+            "Use web search for benchmark comparison",
+            value=False,
+            key=f"use_web_search_{selected_scenario}",
+        )
         chat_history_key = f"model_chat_history_{selected_scenario}"
         chat_history = st.session_state.setdefault(chat_history_key, [])
         for message in chat_history:
@@ -3536,16 +3522,41 @@ def main() -> None:
         )
         if prompt:
             chat_history.append({"role": "user", "content": prompt})
+            qa_context_frames: Dict[str, pd.DataFrame] = {
+                "Assumptions schedule": assumption_schedule_df,
+                "Annual summary": annual_df,
+                "Valuation": valuation_df,
+                "Cash flows": cashflow_df,
+                "Income statement": income_df,
+                "Balance sheet": balance_df,
+                "Cash flow statement": cash_statement_df,
+                "Debt schedule": loan_df,
+                "Advanced metrics": metrics_df,
+                "DSCR": dscr_df,
+                "Trend analysis": trend_df,
+                "Coverage analysis": coverage_df,
+                "Leverage analysis": leverage_df,
+                "What-if analysis": what_if_df,
+                "Break-even analysis": break_even_df,
+                "Forecast projections": forecast_df,
+                "Time-series forecast": time_series_df,
+                "Scenario planning": scenario_df,
+                "Risk observations": risk_df,
+                "ML methods": ml_methods_df,
+                "Monte Carlo summary": monte_carlo_summary_df,
+                "Monte Carlo samples": monte_carlo_samples_df,
+                "Revenue by category": summary_by_category,
+                "Revenue annual totals": annual_totals_df,
+            }
+            for category, rows in revenue_schedules.items():
+                qa_context_frames[f"Revenue schedule - {category}"] = pd.DataFrame(rows)
             answer = _answer_model_question(
                 prompt,
+                qa_context_frames,
                 assumptions,
                 valuation,
-                annual_df,
-                cashflow_df,
-                dscr_df,
-                break_even_df,
-                scorecard_df,
                 rag_chunks,
+                use_web_search=use_web_search,
             )
             chat_history.append({"role": "assistant", "content": answer})
             st.session_state[chat_history_key] = chat_history

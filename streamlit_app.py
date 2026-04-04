@@ -4132,6 +4132,47 @@ def main() -> None:
             )
             advanced["metrics"] = metrics_df.replace({pd.NA: None}).to_dict("records")
 
+        monte_carlo_p5 = None
+        monte_carlo_p50 = None
+        monte_carlo_p95 = None
+        if not monte_carlo_summary_df.empty:
+            summary_row = monte_carlo_summary_df.iloc[0]
+            monte_carlo_p5 = _to_float(summary_row.get("p5_npv"))
+            monte_carlo_p95 = _to_float(summary_row.get("p95_npv"))
+        if not monte_carlo_samples_df.empty and "npv" in monte_carlo_samples_df.columns:
+            npv_series = pd.to_numeric(monte_carlo_samples_df["npv"], errors="coerce").dropna()
+            if not npv_series.empty:
+                monte_carlo_p50 = float(npv_series.quantile(0.5))
+
+        avg_break_even_price = None
+        if not break_even_df.empty and "Break-even price" in break_even_df.columns:
+            break_even_series = pd.to_numeric(
+                break_even_df["Break-even price"], errors="coerce"
+            ).dropna()
+            if not break_even_series.empty:
+                avg_break_even_price = float(break_even_series.mean())
+
+        annual_net_income = None
+        if not income_df.empty and "net_income" in income_df.columns:
+            income_series = pd.to_numeric(income_df["net_income"], errors="coerce").dropna()
+            if not income_series.empty:
+                annual_net_income = float(income_series.iloc[0])
+
+        payback_period = _to_float(valuation.get("payback_period_years"))
+        st.markdown("### Simulation diagnostics")
+        st.markdown(
+            "\n".join(
+                [
+                    f"Monte Carlo NPV P5: { _format_currency(monte_carlo_p5) }",
+                    f"Monte Carlo NPV P50: { _format_currency(monte_carlo_p50) }",
+                    f"Monte Carlo NPV P95: { _format_currency(monte_carlo_p95) }",
+                    f"Average break-even price per kg: { _format_currency(avg_break_even_price) }",
+                    f"Annual net income (current run): { _format_currency(annual_net_income) }",
+                    f"Payback period: {payback_period:.2f} years" if payback_period is not None else "Payback period: N/A years",
+                ]
+            )
+        )
+
         st.subheader("Simulation builder")
         custom_defaults = copy.deepcopy(custom_definition_defaults)
         custom_editor_df = _render_schedule_editor(

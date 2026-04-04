@@ -3446,6 +3446,49 @@ def main() -> None:
         "payback": _metric_value("Payback period (years)"),
     }
 
+    payback_period_value = _to_float(_metric_value("Payback period (years)"))
+    if isinstance(payback_period_value, float) and math.isnan(payback_period_value):
+        payback_period_value = None
+    avg_break_even_price_value = None
+    if not break_even_df.empty and "Break-even price" in break_even_df.columns:
+        break_even_values = pd.to_numeric(
+            break_even_df["Break-even price"], errors="coerce"
+        ).dropna()
+        if not break_even_values.empty:
+            avg_break_even_price_value = float(break_even_values.mean())
+
+    monte_carlo_p5_value = None
+    monte_carlo_p95_value = None
+    if not monte_carlo_summary_df.empty:
+        summary_row = monte_carlo_summary_df.iloc[0]
+        monte_carlo_p5_value = _to_float(summary_row.get("p5_npv"))
+        monte_carlo_p95_value = _to_float(summary_row.get("p95_npv"))
+        if isinstance(monte_carlo_p5_value, float) and math.isnan(monte_carlo_p5_value):
+            monte_carlo_p5_value = None
+        if isinstance(monte_carlo_p95_value, float) and math.isnan(monte_carlo_p95_value):
+            monte_carlo_p95_value = None
+    monte_carlo_p50_value = None
+    if not monte_carlo_samples_df.empty and "npv" in monte_carlo_samples_df.columns:
+        npv_series = pd.to_numeric(monte_carlo_samples_df["npv"], errors="coerce").dropna()
+        if not npv_series.empty:
+            monte_carlo_p50_value = float(npv_series.quantile(0.5))
+
+    st.markdown("### Cross-page simulation KPIs")
+    kpi_cols = st.columns(5)
+    kpi_cols[0].metric(
+        "Payback period",
+        f"{payback_period_value:.2f} years"
+        if payback_period_value is not None
+        else "N/A years",
+    )
+    kpi_cols[1].metric(
+        "Avg break-even price/kg",
+        _format_currency(avg_break_even_price_value),
+    )
+    kpi_cols[2].metric("Monte Carlo NPV P5", _format_currency(monte_carlo_p5_value))
+    kpi_cols[3].metric("Monte Carlo NPV P50", _format_currency(monte_carlo_p50_value))
+    kpi_cols[4].metric("Monte Carlo NPV P95", _format_currency(monte_carlo_p95_value))
+
     with production_tab:
         download_container = st.container()
         export_map: Dict[str, Dict[str, Any]] = st.session_state.setdefault(

@@ -2331,34 +2331,47 @@ def _answer_unified_orchestrator_question(
     )
 
     lines = [
-        "Unified AI orchestration response:",
+        "### Executive answer",
+        (
+            f"The integrated model indicates a **{readiness.get('verdict', 'N/A')}** profile "
+            f"with investor-readiness score **{readiness.get('score', 0.0):.0f}/100**."
+        ),
+        "",
+        "### Internal model findings",
         f"- Intent: {intent.replace('_', ' ').title()}",
-        f"- Investor-readiness: {readiness.get('verdict', 'N/A')} ({readiness.get('score', 0.0):.0f}/100)",
         f"- NPV: {kpis.get('npv', float('nan')):,.0f}" if "npv" in kpis else "- NPV: N/A",
         f"- IRR: {kpis.get('irr', float('nan')):.2%}" if "irr" in kpis else "- IRR: N/A",
         f"- Avg DSCR: {kpis.get('avg_dscr', float('nan')):.2f}" if "avg_dscr" in kpis else "- Avg DSCR: N/A",
         f"- Price -5% NPV: {sensitivity.get('price_minus_5pct_npv', float('nan')):,.0f}",
     ]
-    if strategic_analysis:
-        lines.append("")
-        lines.append("Strategic analysis:")
-        lines.extend([f"- {item}" for item in strategic_analysis[:3]])
-    if recommendations:
-        lines.append("")
-        lines.append("Proactive recommendations:")
-        lines.extend([f"- {item}" for item in recommendations[:3]])
+    lines.extend(["", "### Web-based best-practice comparison"])
+    lines.append(
+        "- External web validation is not executed inside this in-app deterministic Q&A runtime."
+    )
+    lines.append(
+        "- For production decisions, run a web-backed benchmark pass (regulatory guidance, lender covenants, industry norms) before final sign-off."
+    )
+    lines.extend(["", "### Key gaps, risks, or strengths"])
+    for item in strategic_analysis[:3]:
+        lines.append(f"- {item}")
     if evidence_rows:
-        lines.append("")
-        lines.append("Explainability (model evidence):")
+        lines.append("- Explainability is available from model evidence rows below.")
+    if rag_matches:
+        lines.append("- RAG evidence is available from indexed research documents.")
+    lines.extend(["", "### Professional recommendation"])
+    for item in recommendations[:3]:
+        lines.append(f"- {item}")
+    lines.extend(["", "### Sources"])
+    if evidence_rows:
         for item in evidence_rows:
             lines.append(f"- {item['citation']} {item['row_text']}")
     if rag_matches:
-        lines.append("")
-        lines.append("Grounding (research evidence):")
         for match in rag_matches:
             snippet = " ".join(str(match.get("text", "")).split())[:220]
             source = match.get("source", "document")
             lines.append(f"- [RAG: {source}] {snippet}")
+    if not evidence_rows and not rag_matches:
+        lines.append("- Internal model output tables (no additional evidence rows matched this question).")
     return "\n".join(lines)
 
 

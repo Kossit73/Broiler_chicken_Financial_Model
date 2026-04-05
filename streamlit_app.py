@@ -2464,7 +2464,7 @@ def _generate_excel_bytes(
         except ImportError as exc:  # pragma: no cover - surfaced in UI
             st.error(
                 "Excel exports require either the `xlsxwriter` or `openpyxl` package. "
-                "Install one of these dependencies and try again."
+                "Install dependencies from `requirements.txt` and try again."
             )
             raise RuntimeError("Missing Excel writer dependency") from exc
 

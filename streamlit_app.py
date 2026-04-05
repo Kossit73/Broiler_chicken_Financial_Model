@@ -1303,6 +1303,22 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
         else:
             _record_pdf_failure("tesseract binary unavailable")
 
+        # Dependency-free fallback: recover readable text segments directly from PDF bytes.
+        # This is not as accurate as parser libraries, but it prevents hard indexing failure
+        # when optional PDF dependencies are unavailable in a deployment environment.
+        try:
+            decoded = file_bytes.decode("latin-1", errors="ignore")
+            decoded = decoded.replace("\x00", " ")
+            decoded = re.sub(r"\s+", " ", decoded)
+            text_candidates = re.findall(r"[A-Za-z][A-Za-z0-9 ,.;:()\\-_/]{24,}", decoded)
+            if text_candidates:
+                extracted = "\n".join(text_candidates[:300]).strip()
+                if extracted:
+                    return extracted, "pdf-byte-fallback", None
+            _record_pdf_failure("pdf-byte-fallback returned empty text")
+        except Exception as exc:
+            _record_pdf_failure("pdf-byte-fallback failed", exc)
+
         details = "; ".join(pdf_failures[:6]) if pdf_failures else "No parser diagnostics available"
         return "", "pdf", (
             "No PDF parser/OCR could extract text "
@@ -2180,6 +2196,185 @@ def _answer_model_question(
     return "\n".join(parts)
 
 
+def _assess_investor_readiness(
+    kpis: Dict[str, float], benchmarks: Dict[str, float]
+) -> Dict[str, Any]:
+    """Score investor readiness against benchmark hurdles with explainable outcomes."""
+
+    checks: List[Dict[str, Any]] = []
+    irr_value = kpis.get("irr")
+    dscr_value = kpis.get("avg_dscr")
+    payback_value = kpis.get("payback_years")
+
+    target_irr = float(benchmarks.get("target_irr", 0.18))
+    min_dscr = float(benchmarks.get("min_dscr", 1.5))
+    max_payback = float(benchmarks.get("max_payback_years", 6.0))
+
+    checks.append(
+        {
+            "metric": "IRR",
+            "value": irr_value,
+            "target": target_irr,
+            "pass": irr_value is not None and irr_value >= target_irr,
+            "rule": "Higher is better",
+        }
+    )
+    checks.append(
+        {
+            "metric": "Average DSCR",
+            "value": dscr_value,
+            "target": min_dscr,
+            "pass": dscr_value is not None and dscr_value >= min_dscr,
+            "rule": "Higher is better",
+        }
+    )
+    checks.append(
+        {
+            "metric": "Payback (years)",
+            "value": payback_value,
+            "target": max_payback,
+            "pass": payback_value is not None and payback_value <= max_payback,
+            "rule": "Lower is better",
+        }
+    )
+
+    passes = sum(1 for item in checks if item["pass"])
+    score = (passes / max(len(checks), 1)) * 100.0
+    if score >= 80:
+        verdict = "Investor-ready"
+    elif score >= 50:
+        verdict = "Near-ready"
+    else:
+        verdict = "Needs improvement"
+    return {"score": score, "verdict": verdict, "checks": checks}
+
+
+def _build_unified_orchestration_state(
+    config: Dict[str, Any],
+    context_frames: Dict[str, pd.DataFrame],
+    assumptions: Assumptions,
+    valuation: Dict[str, Any],
+    rag_chunks: Optional[List[Dict[str, Any]]],
+    benchmarks: Dict[str, float],
+    investor_recommendations: List[str],
+) -> Dict[str, Any]:
+    """Create shared knowledge + reasoning outputs for the unified AI orchestration layer."""
+
+    kpis = _compute_chat_kpis(context_frames, valuation)
+    payback_years = _to_float(config.get("payback_years"))
+    if payback_years is not None:
+        kpis["payback_years"] = payback_years
+    sensitivity = _run_true_deterministic_sensitivity(assumptions)
+    readiness = _assess_investor_readiness(kpis, benchmarks)
+
+    strategic_analysis: List[str] = []
+    if "avg_dscr" in kpis and kpis["avg_dscr"] < benchmarks.get("min_dscr", 1.5):
+        strategic_analysis.append(
+            "Debt service resilience is below benchmark; prioritize margin protection and debt profile optimization."
+        )
+    if "irr" in kpis and kpis["irr"] < benchmarks.get("target_irr", 0.18):
+        strategic_analysis.append(
+            "Return profile is below investor hurdle; focus on pricing, productivity, and capex efficiency levers."
+        )
+    if sensitivity.get("price_minus_5pct_npv", 0.0) < 0:
+        strategic_analysis.append(
+            "Downside pricing stress drives negative NPV; add hedging/commercial contracts to improve downside protection."
+        )
+    if not strategic_analysis:
+        strategic_analysis.append(
+            "Current scenario shows balanced return and resilience against benchmark thresholds."
+        )
+
+    return {
+        "config": config,
+        "knowledge": {
+            "context_frames": context_frames,
+            "rag_chunks": rag_chunks or [],
+            "kpis": kpis,
+            "sensitivity": sensitivity,
+            "benchmarks": benchmarks,
+        },
+        "reasoning": {
+            "investor_readiness": readiness,
+            "strategic_analysis": strategic_analysis,
+            "proactive_recommendations": investor_recommendations[:5],
+        },
+    }
+
+
+def _answer_unified_orchestrator_question(
+    question: str,
+    orchestration_state: Dict[str, Any],
+) -> str:
+    """Answer with shared orchestration knowledge and explainable decision-support context."""
+
+    q = (question or "").strip()
+    if not q:
+        return "Please enter a question for the unified AI orchestration system."
+
+    knowledge = orchestration_state.get("knowledge", {})
+    context_frames = knowledge.get("context_frames", {})
+    kpis = knowledge.get("kpis", {})
+    sensitivity = knowledge.get("sensitivity", {})
+    readiness = orchestration_state.get("reasoning", {}).get("investor_readiness", {})
+    strategic_analysis = orchestration_state.get("reasoning", {}).get(
+        "strategic_analysis", []
+    )
+    recommendations = orchestration_state.get("reasoning", {}).get(
+        "proactive_recommendations", []
+    )
+
+    intent = _classify_question_intent(q)
+    evidence_rows = _select_evidence_rows(q, context_frames, intent, top_k=5)
+    rag_matches = _retrieve_rag_evidence_for_question(
+        q, knowledge.get("rag_chunks", []), top_k=3
+    )
+
+    lines = [
+        "### Executive answer",
+        (
+            f"The integrated model indicates a **{readiness.get('verdict', 'N/A')}** profile "
+            f"with investor-readiness score **{readiness.get('score', 0.0):.0f}/100**."
+        ),
+        "",
+        "### Internal model findings",
+        f"- Intent: {intent.replace('_', ' ').title()}",
+        f"- NPV: {kpis.get('npv', float('nan')):,.0f}" if "npv" in kpis else "- NPV: N/A",
+        f"- IRR: {kpis.get('irr', float('nan')):.2%}" if "irr" in kpis else "- IRR: N/A",
+        f"- Avg DSCR: {kpis.get('avg_dscr', float('nan')):.2f}" if "avg_dscr" in kpis else "- Avg DSCR: N/A",
+        f"- Price -5% NPV: {sensitivity.get('price_minus_5pct_npv', float('nan')):,.0f}",
+    ]
+    lines.extend(["", "### Web-based best-practice comparison"])
+    lines.append(
+        "- External web validation is not executed inside this in-app deterministic Q&A runtime."
+    )
+    lines.append(
+        "- For production decisions, run a web-backed benchmark pass (regulatory guidance, lender covenants, industry norms) before final sign-off."
+    )
+    lines.extend(["", "### Key gaps, risks, or strengths"])
+    for item in strategic_analysis[:3]:
+        lines.append(f"- {item}")
+    if evidence_rows:
+        lines.append("- Explainability is available from model evidence rows below.")
+    if rag_matches:
+        lines.append("- RAG evidence is available from indexed research documents.")
+    lines.extend(["", "### Professional recommendation"])
+    for item in recommendations[:3]:
+        lines.append(f"- {item}")
+    lines.extend(["", "### Sources"])
+    if evidence_rows:
+        for item in evidence_rows:
+            lines.append(f"- {item['citation']} {item['row_text']}")
+    if rag_matches:
+        for match in rag_matches:
+            snippet = " ".join(str(match.get("text", "")).split())[:220]
+            source = match.get("source", "document")
+            lines.append(f"- [RAG: {source}] {snippet}")
+    if not evidence_rows and not rag_matches:
+        lines.append("- Internal model output tables (no additional evidence rows matched this question).")
+    return "\n".join(lines)
+
+
 def _rerun() -> None:
     """Trigger a Streamlit rerun."""
 
@@ -2233,6 +2428,12 @@ def _normalize_scenario_payload(payload: Any) -> Dict[str, Any]:
     if not isinstance(benchmark_payload, dict):
         benchmark_payload = {}
 
+    if "eggs_per_cycle_default" in assumptions_payload and "eggs_per_bird_per_cycle" not in assumptions_payload:
+        assumptions_payload["eggs_per_bird_per_cycle"] = float(
+            assumptions_payload.get("eggs_per_cycle_default", 0.0) or 0.0
+        ) / max(float(assumptions_payload.get("birds_per_cycle", 1) or 1), 1.0)
+    assumptions_payload.pop("eggs_per_cycle_default", None)
+
     normalized["assumptions"] = assumptions_payload
     normalized["ai_settings"] = {
         **DEFAULT_AI_SETTINGS,
@@ -2263,7 +2464,7 @@ def _generate_excel_bytes(
         except ImportError as exc:  # pragma: no cover - surfaced in UI
             st.error(
                 "Excel exports require either the `xlsxwriter` or `openpyxl` package. "
-                "Install one of these dependencies and try again."
+                "Install dependencies from `requirements.txt` and try again."
             )
             raise RuntimeError("Missing Excel writer dependency") from exc
 
@@ -2279,6 +2480,64 @@ def _generate_excel_bytes(
                     else value
                 )
         return safe
+
+    def _to_sheet_name(name: str) -> str:
+        cleaned = (
+            str(name)
+            .replace("[", "")
+            .replace("]", "")
+            .replace("(", "")
+            .replace(")", "")
+            .replace("/", " ")
+            .replace("\\", " ")
+            .replace(":", " ")
+            .replace("*", " ")
+            .replace("?", " ")
+        )
+        cleaned = " ".join(cleaned.split()).strip()
+        return (cleaned[:31] or "Sheet").strip()
+
+    def _add_xlsxwriter_chart(
+        writer: pd.ExcelWriter,
+        sheet_name: str,
+        data_frame: pd.DataFrame,
+        title: str,
+        chart_type: str = "line",
+        position: str = "J2",
+    ) -> None:
+        if engine != "xlsxwriter" or data_frame.empty:
+            return
+        workbook = writer.book
+        worksheet = writer.sheets.get(sheet_name)
+        if worksheet is None:
+            return
+        numeric_cols: List[int] = []
+        for idx, column in enumerate(data_frame.columns):
+            series = pd.to_numeric(data_frame[column], errors="coerce")
+            if series.notna().sum() > 0:
+                numeric_cols.append(idx)
+        if not numeric_cols:
+            return
+        category_col = 0
+        series_cols = [idx for idx in numeric_cols if idx != category_col][:3]
+        if not series_cols:
+            series_cols = numeric_cols[:1]
+        row_count = len(data_frame.index)
+        if row_count <= 0:
+            return
+        chart = workbook.add_chart({"type": chart_type})
+        for col_idx in series_cols:
+            chart.add_series(
+                {
+                    "name": [sheet_name, 0, col_idx],
+                    "categories": [sheet_name, 1, category_col, row_count, category_col],
+                    "values": [sheet_name, 1, col_idx, row_count, col_idx],
+                }
+            )
+        chart.set_title({"name": title})
+        chart.set_legend({"position": "bottom"})
+        chart.set_size({"width": 720, "height": 360})
+        worksheet.insert_chart(position, chart)
 
     try:
         with pd.ExcelWriter(buffer, engine=engine) as writer:
@@ -2316,26 +2575,112 @@ def _generate_excel_bytes(
             )
 
             advanced = results["advanced_analytics"]
-            _excel_ready_df(pd.DataFrame(advanced["metrics"])).to_excel(
-                writer, sheet_name="Advanced Metrics", index=False
+            advanced_sheet_frames: Dict[str, pd.DataFrame] = {
+                "Advanced Metrics": _excel_ready_df(pd.DataFrame(advanced.get("metrics", []))),
+                "DSCR": _excel_ready_df(pd.DataFrame(advanced.get("dscr", []))),
+                "Trend Analysis": _excel_ready_df(pd.DataFrame(advanced.get("trend", []))),
+                "Returns": _excel_ready_df(pd.DataFrame(advanced.get("returns", []))),
+                "Coverage": _excel_ready_df(pd.DataFrame(advanced.get("coverage", []))),
+                "Leverage": _excel_ready_df(pd.DataFrame(advanced.get("leverage", []))),
+                "What If": _excel_ready_df(pd.DataFrame(advanced.get("what_if", []))),
+                "Scenario Planning": _excel_ready_df(pd.DataFrame(advanced.get("scenario_planning", []))),
+                "Break Even": _excel_ready_df(pd.DataFrame(advanced.get("break_even", []))),
+                "Goal Seek": _excel_ready_df(pd.DataFrame([advanced.get("goal_seek", {})])),
+            }
+            predictive = advanced.get("predictive", {})
+            advanced_sheet_frames["Forecast"] = _excel_ready_df(
+                pd.DataFrame(predictive.get("automated_forecast", []))
             )
-            _excel_ready_df(pd.DataFrame(advanced["dscr"])).to_excel(
-                writer, sheet_name="DSCR", index=False
+            advanced_sheet_frames["Time Series"] = _excel_ready_df(
+                pd.DataFrame(predictive.get("time_series", {}).get("forecast", []))
             )
-            _excel_ready_df(pd.DataFrame(advanced["trend"])).to_excel(
-                writer, sheet_name="Trend Analysis", index=False
+            advanced_sheet_frames["Risk Observations"] = _excel_ready_df(
+                pd.DataFrame(predictive.get("risk_anomalies", {}).get("observations", []))
+            )
+            advanced_sheet_frames["ML Methods"] = _excel_ready_df(
+                pd.DataFrame(predictive.get("ml_methods", []))
+            )
+            monte_carlo = advanced.get("monte_carlo", {})
+            advanced_sheet_frames["Monte Carlo Summary"] = _excel_ready_df(
+                pd.DataFrame([monte_carlo.get("summary", {})])
+            )
+            advanced_sheet_frames["Monte Carlo Samples"] = _excel_ready_df(
+                pd.DataFrame(monte_carlo.get("samples", []))
             )
 
+            revenue_summary = summarise_revenue_totals(
+                results["revenue_schedules"],
+                model.assumptions.cycles_per_year,
+                model.assumptions.production_horizon_years,
+                model.assumptions.production_start_year,
+            )
+            advanced_sheet_frames["Revenue Annual Totals"] = _excel_ready_df(
+                pd.DataFrame(revenue_summary.get("annual_totals", []))
+            )
+            advanced_sheet_frames["Revenue By Category"] = _excel_ready_df(
+                pd.DataFrame(revenue_summary.get("by_category", []))
+            )
+
+            insight_rows = [
+                {"Insight": "NPV", "Value": results.get("valuation", {}).get("npv")},
+                {"Insight": "IRR", "Value": results.get("valuation", {}).get("irr")},
+                {"Insight": "Discount rate", "Value": results.get("valuation", {}).get("discount_rate")},
+                {"Insight": "Cycles per year", "Value": model.assumptions.cycles_per_year},
+                {"Insight": "Horizon years", "Value": model.assumptions.production_horizon_years},
+            ]
+            mc_summary = monte_carlo.get("summary", {}) if isinstance(monte_carlo, dict) else {}
+            for key in ("p10_npv", "p50_npv", "p90_npv", "mean_npv", "std_npv"):
+                if key in mc_summary:
+                    insight_rows.append({"Insight": f"Monte Carlo {key}", "Value": mc_summary.get(key)})
+            advanced_sheet_frames["Advanced Insights"] = _excel_ready_df(
+                pd.DataFrame(insight_rows)
+            )
+
+            for raw_name, frame in advanced_sheet_frames.items():
+                if frame.empty:
+                    continue
+                sheet_name = _to_sheet_name(raw_name)
+                frame.to_excel(writer, sheet_name=sheet_name, index=False)
+                if raw_name in {
+                    "Trend Analysis",
+                    "DSCR",
+                    "What If",
+                    "Scenario Planning",
+                    "Forecast",
+                    "Time Series",
+                    "Revenue Annual Totals",
+                    "Monte Carlo Samples",
+                }:
+                    chart_type = "line"
+                    if raw_name in {"What If", "Scenario Planning"}:
+                        chart_type = "column"
+                    if raw_name == "Monte Carlo Samples":
+                        chart_type = "scatter"
+                    _add_xlsxwriter_chart(
+                        writer,
+                        sheet_name,
+                        frame,
+                        title=f"{raw_name} Chart",
+                        chart_type=chart_type,
+                    )
+
             for category, rows in results["revenue_schedules"].items():
-                safe_name = (
-                    category.replace("(", "")
-                    .replace(")", "")
-                    .replace(",", "")
-                    .replace("-", " ")
+                safe_name = _to_sheet_name(
+                    " ".join(
+                        word.title()
+                        for word in category.replace(",", "").replace("-", " ").split()
+                    )
                 )
-                safe_name = " ".join(word.title() for word in safe_name.split())
-                _excel_ready_df(pd.DataFrame(rows)).to_excel(
-                    writer, sheet_name=safe_name[:31] or "Revenue", index=False
+                category_df = _excel_ready_df(pd.DataFrame(rows))
+                category_df.to_excel(
+                    writer, sheet_name=safe_name, index=False
+                )
+                _add_xlsxwriter_chart(
+                    writer,
+                    safe_name,
+                    category_df,
+                    title=f"{category} Trend",
+                    chart_type="line",
                 )
 
             ai_settings = st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS)
@@ -3495,11 +3840,11 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
                 "step": 0.1,
             },
             {
-                "attr": "eggs_per_cycle_default",
-                "label": "Eggs per cycle (default)",
+                "attr": "eggs_per_bird_per_cycle",
+                "label": "Eggs per bird per cycle",
                 "min": 0.0,
-                "max": 200000.0,
-                "step": 100.0,
+                "max": 1000.0,
+                "step": 1.0,
             },
             {
                 "attr": "manure_price_per_ton",
@@ -3771,7 +4116,7 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
         discount_rate=float(values["discount_rate"]),
         price_growth=float(values["price_growth"]),
         eggs_price_per_dozen=float(values["eggs_price_per_dozen"]),
-        eggs_per_cycle_default=float(values["eggs_per_cycle_default"]),
+        eggs_per_bird_per_cycle=float(values["eggs_per_bird_per_cycle"]),
         manure_price_per_ton=float(values["manure_price_per_ton"]),
         live_bird_price_per_head=float(values["live_bird_price_per_head"]),
         byproduct_price_per_kg=float(values["byproduct_price_per_kg"]),
@@ -4211,13 +4556,24 @@ def main() -> None:
 
 
     with ai_ml_tab:
-        st.header("AI & Machine Learning Settings")
-        st.caption("Configure model provider, forecast methods, and generative insights options.")
+        st.header("Unified AI System")
+        st.caption(
+            "Single integrated AI workflow combining settings, investor benchmarking, governance, "
+            "RAG research, model Q&A, and business-plan generation."
+        )
         _render_ai_settings(payload)
-        st.markdown("### Investor benchmark hurdles")
+        st.markdown("### Unified configuration")
         benchmark_defaults = payload.get(
             "investor_benchmarks", DEFAULT_INVESTOR_BENCHMARKS.copy()
         )
+        unified_ai_state: Dict[str, Any] = {
+            "config": {
+                "scenario": selected_scenario,
+                "ai_settings": payload.get("ai_settings", DEFAULT_AI_SETTINGS.copy()),
+            },
+            "inputs": {},
+            "outputs": {},
+        }
         bcol1, bcol2, bcol3 = st.columns(3)
         target_irr = bcol1.number_input(
             "Target IRR",
@@ -4248,6 +4604,7 @@ def main() -> None:
             "min_dscr": float(min_dscr),
             "max_payback_years": float(max_payback),
         }
+        unified_ai_state["config"]["investor_benchmarks"] = payload["investor_benchmarks"]
         st.session_state["scenario_store"][selected_scenario] = payload
 
         scorecard_df = _build_investor_scorecard(
@@ -4266,14 +4623,20 @@ def main() -> None:
             scorecard_df = scorecard_df.copy()
             scorecard_df["Benchmark"] = scorecard_df["Metric"].map(benchmark_map)
             scorecard_df["Benchmark"] = scorecard_df["Benchmark"].fillna("N/A")
-            st.markdown("### Investor scorecard")
+            st.markdown("### Unified output: investor scorecard")
             st.dataframe(scorecard_df, use_container_width=True, hide_index=True)
+        unified_ai_state["outputs"]["investor_scorecard_rows"] = int(
+            len(scorecard_df.index) if isinstance(scorecard_df, pd.DataFrame) else 0
+        )
 
-        st.markdown("### Assumption confidence bands")
+        st.markdown("### Unified output: assumption confidence bands")
         confidence_df = _build_assumption_confidence_frame(assumptions)
         st.dataframe(confidence_df, use_container_width=True, hide_index=True)
+        unified_ai_state["outputs"]["confidence_band_rows"] = int(
+            len(confidence_df.index) if isinstance(confidence_df, pd.DataFrame) else 0
+        )
 
-        st.markdown("### Model governance")
+        st.markdown("### Unified output: model governance")
         assumptions_hash = hashlib.sha256(
             json.dumps(payload.get("assumptions", {}), sort_keys=True).encode("utf-8")
         ).hexdigest()[:12]
@@ -4290,8 +4653,12 @@ def main() -> None:
             st.markdown("**Recent changes:**")
             for entry in governance_log[-5:]:
                 st.markdown(f"- {entry.get('timestamp')}: {entry.get('event')}")
+        unified_ai_state["outputs"]["governance"] = {
+            "assumptions_hash": assumptions_hash,
+            "recent_events": governance_log[-5:],
+        }
 
-        st.markdown("### RAG research library")
+        st.markdown("### Unified input: RAG research library")
         st.caption(
             "Upload research papers/documents to ground business-plan rewrites with evidence."
         )
@@ -4316,7 +4683,7 @@ def main() -> None:
             expanded_uploads = _expand_uploaded_documents(uploaded_docs)
             for upload_entry in expanded_uploads:
                 file_name = upload_entry["name"]
-                payload = upload_entry["payload"]
+                file_payload = upload_entry["payload"]
                 if not upload_entry.get("supported", True):
                     parse_diagnostics.append(
                         {
@@ -4330,7 +4697,9 @@ def main() -> None:
                         }
                     )
                     continue
-                extracted, parser_used, parse_error = _extract_text_from_payload(file_name, payload)
+                extracted, parser_used, parse_error = _extract_text_from_payload(
+                    file_name, file_payload
+                )
                 if not extracted.strip():
                     st.warning(
                         f"Could not parse text for `{file_name}`. "
@@ -4382,8 +4751,12 @@ def main() -> None:
         rag_docs = rag_store.get(selected_scenario, {}).get("documents", [])
         rag_chunks = rag_store.get(selected_scenario, {}).get("chunks", [])
         st.write(f"Indexed documents: **{len(rag_docs)}** | Chunks: **{len(rag_chunks)}**")
+        unified_ai_state["inputs"]["rag"] = {
+            "documents": len(rag_docs),
+            "chunks": len(rag_chunks),
+        }
 
-        st.markdown("### Model Q&A chatbox")
+        st.markdown("### Unified interaction: model Q&A chatbox")
         st.caption(
             "Ask a question and get an answer strictly from this scenario's model outputs."
         )
@@ -4397,49 +4770,89 @@ def main() -> None:
             "Ask a question about this model scenario...",
             key=f"model_chat_input_{selected_scenario}",
         )
+        qa_context_frames: Dict[str, pd.DataFrame] = {
+            "Assumptions schedule": assumption_schedule_df,
+            "Annual summary": annual_df,
+            "Valuation": valuation_df,
+            "Cash flows": cashflow_df,
+            "Income statement": income_df,
+            "Balance sheet": balance_df,
+            "Cash flow statement": cash_statement_df,
+            "Debt schedule": loan_df,
+            "Advanced metrics": metrics_df,
+            "DSCR": dscr_df,
+            "Trend analysis": trend_df,
+            "Coverage analysis": coverage_df,
+            "Leverage analysis": leverage_df,
+            "What-if analysis": what_if_df,
+            "Break-even analysis": break_even_df,
+            "Forecast projections": forecast_df,
+            "Time-series forecast": time_series_df,
+            "Scenario planning": scenario_df,
+            "Risk observations": risk_df,
+            "ML methods": ml_methods_df,
+            "Monte Carlo summary": monte_carlo_summary_df,
+            "Monte Carlo samples": monte_carlo_samples_df,
+            "Revenue by category": summary_by_category,
+            "Revenue annual totals": annual_totals_df,
+        }
+        for category, rows in revenue_schedules.items():
+            qa_context_frames[f"Revenue schedule - {category}"] = pd.DataFrame(rows)
+        unified_ai_state["inputs"]["context_tables"] = sorted(qa_context_frames.keys())
+        investor_recommendations = _generate_investor_recommendations(
+            assumptions,
+            valuation,
+            annual_df,
+            dscr_df,
+            break_even_df,
+        )
+        orchestration_config = {
+            "scenario": selected_scenario,
+            "model_version": "v1.0",
+            "governance_hash": assumptions_hash,
+            "payback_years": payback_period_value,
+        }
+        unified_ai_state["config"]["orchestration"] = orchestration_config
+        orchestration_state = _build_unified_orchestration_state(
+            orchestration_config,
+            qa_context_frames,
+            assumptions,
+            valuation,
+            rag_chunks,
+            payload["investor_benchmarks"],
+            investor_recommendations,
+        )
+        readiness = orchestration_state["reasoning"]["investor_readiness"]
+        st.markdown("### Unified intelligence engine")
+        st.caption(
+            "Cross-functional reasoning with shared context, grounded evidence, and investor decision support."
+        )
+        readiness_cols = st.columns(3)
+        readiness_cols[0].metric("Readiness verdict", readiness.get("verdict", "N/A"))
+        readiness_cols[1].metric("Readiness score", f"{readiness.get('score', 0.0):.0f}/100")
+        readiness_cols[2].metric(
+            "Strategic signals",
+            len(orchestration_state["reasoning"].get("strategic_analysis", [])),
+        )
+        with st.expander("Explainable strategic analysis", expanded=False):
+            for line in orchestration_state["reasoning"].get("strategic_analysis", []):
+                st.markdown(f"- {line}")
+            for line in orchestration_state["reasoning"].get(
+                "proactive_recommendations", []
+            ):
+                st.markdown(f"- Recommendation: {line}")
+        unified_ai_state["outputs"]["orchestration_readiness"] = readiness
         if prompt:
             chat_history.append({"role": "user", "content": prompt})
-            qa_context_frames: Dict[str, pd.DataFrame] = {
-                "Assumptions schedule": assumption_schedule_df,
-                "Annual summary": annual_df,
-                "Valuation": valuation_df,
-                "Cash flows": cashflow_df,
-                "Income statement": income_df,
-                "Balance sheet": balance_df,
-                "Cash flow statement": cash_statement_df,
-                "Debt schedule": loan_df,
-                "Advanced metrics": metrics_df,
-                "DSCR": dscr_df,
-                "Trend analysis": trend_df,
-                "Coverage analysis": coverage_df,
-                "Leverage analysis": leverage_df,
-                "What-if analysis": what_if_df,
-                "Break-even analysis": break_even_df,
-                "Forecast projections": forecast_df,
-                "Time-series forecast": time_series_df,
-                "Scenario planning": scenario_df,
-                "Risk observations": risk_df,
-                "ML methods": ml_methods_df,
-                "Monte Carlo summary": monte_carlo_summary_df,
-                "Monte Carlo samples": monte_carlo_samples_df,
-                "Revenue by category": summary_by_category,
-                "Revenue annual totals": annual_totals_df,
-            }
-            for category, rows in revenue_schedules.items():
-                qa_context_frames[f"Revenue schedule - {category}"] = pd.DataFrame(rows)
-            answer = _answer_model_question(
-                prompt,
-                qa_context_frames,
-                assumptions,
-                valuation,
-                rag_chunks,
+            answer = _answer_unified_orchestrator_question(
+                prompt, orchestration_state
             )
             chat_history.append({"role": "assistant", "content": answer})
             st.session_state[chat_history_key] = chat_history
             _rerun()
 
         st.divider()
-        st.subheader("Business Plan Agent")
+        st.subheader("Unified output: Business Plan Agent")
         st.caption(
             "Generate a comprehensive, investor-ready business plan with automated analysis "
             "and visual exhibits derived from the live model outputs."
@@ -4487,13 +4900,6 @@ def main() -> None:
                 plan_markdown = base_plan_markdown
             st.markdown(plan_markdown)
             st.markdown("### Investor attractiveness recommendations")
-            investor_recommendations = _generate_investor_recommendations(
-                assumptions,
-                valuation,
-                annual_df,
-                dscr_df,
-                break_even_df,
-            )
             for recommendation in investor_recommendations:
                 st.markdown(f"- {recommendation}")
 
@@ -4693,6 +5099,16 @@ def main() -> None:
             if mc_chart is not None:
                 st.markdown("#### NPV risk distribution")
                 st.altair_chart(mc_chart, use_container_width=True)
+
+        unified_ai_state["outputs"]["chat_messages"] = len(chat_history)
+        unified_ai_state["outputs"]["business_plan_enabled"] = bool(
+            st.session_state.get(plan_state_key, False)
+        )
+        unified_ai_state["outputs"]["timestamp_utc"] = datetime.now(
+            timezone.utc
+        ).isoformat()
+        payload["ai_unified_system"] = unified_ai_state
+        st.session_state["scenario_store"][selected_scenario] = payload
 
     analytics_namespace = "advanced_schedule_state"
 

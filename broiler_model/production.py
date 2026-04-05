@@ -234,7 +234,13 @@ def build_revenue_schedules(
     fallback_survivors = round(
         assumptions.birds_per_cycle * (1 - assumptions.mortality_rate)
     )
-    eggs_default_dozens = max(float(assumptions.eggs_per_cycle_default) / 12.0, 0.0)
+    eggs_per_bird_per_cycle = max(
+        float(getattr(assumptions, "eggs_per_bird_per_cycle", 0.0)), 0.0
+    )
+    total_eggs_per_cycle = (
+        max(float(assumptions.birds_per_cycle), 0.0) * eggs_per_bird_per_cycle
+    )
+    eggs_default_dozens = total_eggs_per_cycle / 12.0
     fallback_live_weight_kg = fallback_survivors * assumptions.final_weight_kg
 
     for category in REVENUE_CATEGORIES[1:]:

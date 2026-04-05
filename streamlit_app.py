@@ -2196,6 +2196,172 @@ def _answer_model_question(
     return "\n".join(parts)
 
 
+def _assess_investor_readiness(
+    kpis: Dict[str, float], benchmarks: Dict[str, float]
+) -> Dict[str, Any]:
+    """Score investor readiness against benchmark hurdles with explainable outcomes."""
+
+    checks: List[Dict[str, Any]] = []
+    irr_value = kpis.get("irr")
+    dscr_value = kpis.get("avg_dscr")
+    payback_value = kpis.get("payback_years")
+
+    target_irr = float(benchmarks.get("target_irr", 0.18))
+    min_dscr = float(benchmarks.get("min_dscr", 1.5))
+    max_payback = float(benchmarks.get("max_payback_years", 6.0))
+
+    checks.append(
+        {
+            "metric": "IRR",
+            "value": irr_value,
+            "target": target_irr,
+            "pass": irr_value is not None and irr_value >= target_irr,
+            "rule": "Higher is better",
+        }
+    )
+    checks.append(
+        {
+            "metric": "Average DSCR",
+            "value": dscr_value,
+            "target": min_dscr,
+            "pass": dscr_value is not None and dscr_value >= min_dscr,
+            "rule": "Higher is better",
+        }
+    )
+    checks.append(
+        {
+            "metric": "Payback (years)",
+            "value": payback_value,
+            "target": max_payback,
+            "pass": payback_value is not None and payback_value <= max_payback,
+            "rule": "Lower is better",
+        }
+    )
+
+    passes = sum(1 for item in checks if item["pass"])
+    score = (passes / max(len(checks), 1)) * 100.0
+    if score >= 80:
+        verdict = "Investor-ready"
+    elif score >= 50:
+        verdict = "Near-ready"
+    else:
+        verdict = "Needs improvement"
+    return {"score": score, "verdict": verdict, "checks": checks}
+
+
+def _build_unified_orchestration_state(
+    config: Dict[str, Any],
+    context_frames: Dict[str, pd.DataFrame],
+    assumptions: Assumptions,
+    valuation: Dict[str, Any],
+    rag_chunks: Optional[List[Dict[str, Any]]],
+    benchmarks: Dict[str, float],
+    investor_recommendations: List[str],
+) -> Dict[str, Any]:
+    """Create shared knowledge + reasoning outputs for the unified AI orchestration layer."""
+
+    kpis = _compute_chat_kpis(context_frames, valuation)
+    payback_years = _to_float(config.get("payback_years"))
+    if payback_years is not None:
+        kpis["payback_years"] = payback_years
+    sensitivity = _run_true_deterministic_sensitivity(assumptions)
+    readiness = _assess_investor_readiness(kpis, benchmarks)
+
+    strategic_analysis: List[str] = []
+    if "avg_dscr" in kpis and kpis["avg_dscr"] < benchmarks.get("min_dscr", 1.5):
+        strategic_analysis.append(
+            "Debt service resilience is below benchmark; prioritize margin protection and debt profile optimization."
+        )
+    if "irr" in kpis and kpis["irr"] < benchmarks.get("target_irr", 0.18):
+        strategic_analysis.append(
+            "Return profile is below investor hurdle; focus on pricing, productivity, and capex efficiency levers."
+        )
+    if sensitivity.get("price_minus_5pct_npv", 0.0) < 0:
+        strategic_analysis.append(
+            "Downside pricing stress drives negative NPV; add hedging/commercial contracts to improve downside protection."
+        )
+    if not strategic_analysis:
+        strategic_analysis.append(
+            "Current scenario shows balanced return and resilience against benchmark thresholds."
+        )
+
+    return {
+        "config": config,
+        "knowledge": {
+            "context_frames": context_frames,
+            "rag_chunks": rag_chunks or [],
+            "kpis": kpis,
+            "sensitivity": sensitivity,
+            "benchmarks": benchmarks,
+        },
+        "reasoning": {
+            "investor_readiness": readiness,
+            "strategic_analysis": strategic_analysis,
+            "proactive_recommendations": investor_recommendations[:5],
+        },
+    }
+
+
+def _answer_unified_orchestrator_question(
+    question: str,
+    orchestration_state: Dict[str, Any],
+) -> str:
+    """Answer with shared orchestration knowledge and explainable decision-support context."""
+
+    q = (question or "").strip()
+    if not q:
+        return "Please enter a question for the unified AI orchestration system."
+
+    knowledge = orchestration_state.get("knowledge", {})
+    context_frames = knowledge.get("context_frames", {})
+    kpis = knowledge.get("kpis", {})
+    sensitivity = knowledge.get("sensitivity", {})
+    readiness = orchestration_state.get("reasoning", {}).get("investor_readiness", {})
+    strategic_analysis = orchestration_state.get("reasoning", {}).get(
+        "strategic_analysis", []
+    )
+    recommendations = orchestration_state.get("reasoning", {}).get(
+        "proactive_recommendations", []
+    )
+
+    intent = _classify_question_intent(q)
+    evidence_rows = _select_evidence_rows(q, context_frames, intent, top_k=5)
+    rag_matches = _retrieve_rag_evidence_for_question(
+        q, knowledge.get("rag_chunks", []), top_k=3
+    )
+
+    lines = [
+        "Unified AI orchestration response:",
+        f"- Intent: {intent.replace('_', ' ').title()}",
+        f"- Investor-readiness: {readiness.get('verdict', 'N/A')} ({readiness.get('score', 0.0):.0f}/100)",
+        f"- NPV: {kpis.get('npv', float('nan')):,.0f}" if "npv" in kpis else "- NPV: N/A",
+        f"- IRR: {kpis.get('irr', float('nan')):.2%}" if "irr" in kpis else "- IRR: N/A",
+        f"- Avg DSCR: {kpis.get('avg_dscr', float('nan')):.2f}" if "avg_dscr" in kpis else "- Avg DSCR: N/A",
+        f"- Price -5% NPV: {sensitivity.get('price_minus_5pct_npv', float('nan')):,.0f}",
+    ]
+    if strategic_analysis:
+        lines.append("")
+        lines.append("Strategic analysis:")
+        lines.extend([f"- {item}" for item in strategic_analysis[:3]])
+    if recommendations:
+        lines.append("")
+        lines.append("Proactive recommendations:")
+        lines.extend([f"- {item}" for item in recommendations[:3]])
+    if evidence_rows:
+        lines.append("")
+        lines.append("Explainability (model evidence):")
+        for item in evidence_rows:
+            lines.append(f"- {item['citation']} {item['row_text']}")
+    if rag_matches:
+        lines.append("")
+        lines.append("Grounding (research evidence):")
+        for match in rag_matches:
+            snippet = " ".join(str(match.get("text", "")).split())[:220]
+            source = match.get("source", "document")
+            lines.append(f"- [RAG: {source}] {snippet}")
+    return "\n".join(lines)
+
+
 def _rerun() -> None:
     """Trigger a Streamlit rerun."""
 
@@ -4476,14 +4642,53 @@ def main() -> None:
         for category, rows in revenue_schedules.items():
             qa_context_frames[f"Revenue schedule - {category}"] = pd.DataFrame(rows)
         unified_ai_state["inputs"]["context_tables"] = sorted(qa_context_frames.keys())
+        investor_recommendations = _generate_investor_recommendations(
+            assumptions,
+            valuation,
+            annual_df,
+            dscr_df,
+            break_even_df,
+        )
+        orchestration_config = {
+            "scenario": selected_scenario,
+            "model_version": "v1.0",
+            "governance_hash": assumptions_hash,
+            "payback_years": payback_period_value,
+        }
+        unified_ai_state["config"]["orchestration"] = orchestration_config
+        orchestration_state = _build_unified_orchestration_state(
+            orchestration_config,
+            qa_context_frames,
+            assumptions,
+            valuation,
+            rag_chunks,
+            payload["investor_benchmarks"],
+            investor_recommendations,
+        )
+        readiness = orchestration_state["reasoning"]["investor_readiness"]
+        st.markdown("### Unified intelligence engine")
+        st.caption(
+            "Cross-functional reasoning with shared context, grounded evidence, and investor decision support."
+        )
+        readiness_cols = st.columns(3)
+        readiness_cols[0].metric("Readiness verdict", readiness.get("verdict", "N/A"))
+        readiness_cols[1].metric("Readiness score", f"{readiness.get('score', 0.0):.0f}/100")
+        readiness_cols[2].metric(
+            "Strategic signals",
+            len(orchestration_state["reasoning"].get("strategic_analysis", [])),
+        )
+        with st.expander("Explainable strategic analysis", expanded=False):
+            for line in orchestration_state["reasoning"].get("strategic_analysis", []):
+                st.markdown(f"- {line}")
+            for line in orchestration_state["reasoning"].get(
+                "proactive_recommendations", []
+            ):
+                st.markdown(f"- Recommendation: {line}")
+        unified_ai_state["outputs"]["orchestration_readiness"] = readiness
         if prompt:
             chat_history.append({"role": "user", "content": prompt})
-            answer = _answer_model_question(
-                prompt,
-                qa_context_frames,
-                assumptions,
-                valuation,
-                rag_chunks,
+            answer = _answer_unified_orchestrator_question(
+                prompt, orchestration_state
             )
             chat_history.append({"role": "assistant", "content": answer})
             st.session_state[chat_history_key] = chat_history
@@ -4538,13 +4743,6 @@ def main() -> None:
                 plan_markdown = base_plan_markdown
             st.markdown(plan_markdown)
             st.markdown("### Investor attractiveness recommendations")
-            investor_recommendations = _generate_investor_recommendations(
-                assumptions,
-                valuation,
-                annual_df,
-                dscr_df,
-                break_even_df,
-            )
             for recommendation in investor_recommendations:
                 st.markdown(f"- {recommendation}")
 

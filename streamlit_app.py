@@ -2233,6 +2233,12 @@ def _normalize_scenario_payload(payload: Any) -> Dict[str, Any]:
     if not isinstance(benchmark_payload, dict):
         benchmark_payload = {}
 
+    if "eggs_per_cycle_default" in assumptions_payload and "eggs_per_bird_per_cycle" not in assumptions_payload:
+        assumptions_payload["eggs_per_bird_per_cycle"] = float(
+            assumptions_payload.get("eggs_per_cycle_default", 0.0) or 0.0
+        ) / max(float(assumptions_payload.get("birds_per_cycle", 1) or 1), 1.0)
+    assumptions_payload.pop("eggs_per_cycle_default", None)
+
     normalized["assumptions"] = assumptions_payload
     normalized["ai_settings"] = {
         **DEFAULT_AI_SETTINGS,
@@ -3495,11 +3501,11 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
                 "step": 0.1,
             },
             {
-                "attr": "eggs_per_cycle_default",
-                "label": "Eggs per cycle (default)",
+                "attr": "eggs_per_bird_per_cycle",
+                "label": "Eggs per bird per cycle",
                 "min": 0.0,
-                "max": 200000.0,
-                "step": 100.0,
+                "max": 1000.0,
+                "step": 1.0,
             },
             {
                 "attr": "manure_price_per_ton",
@@ -3771,7 +3777,7 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
         discount_rate=float(values["discount_rate"]),
         price_growth=float(values["price_growth"]),
         eggs_price_per_dozen=float(values["eggs_price_per_dozen"]),
-        eggs_per_cycle_default=float(values["eggs_per_cycle_default"]),
+        eggs_per_bird_per_cycle=float(values["eggs_per_bird_per_cycle"]),
         manure_price_per_ton=float(values["manure_price_per_ton"]),
         live_bird_price_per_head=float(values["live_bird_price_per_head"]),
         byproduct_price_per_kg=float(values["byproduct_price_per_kg"]),

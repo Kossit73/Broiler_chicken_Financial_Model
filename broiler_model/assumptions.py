@@ -17,7 +17,7 @@ class Assumptions:
     final_weight_kg: float = 2.5
     live_price_per_kg: float = 1.85
     eggs_price_per_dozen: float = 1.9
-    eggs_per_cycle_default: float = 15000.0
+    eggs_per_bird_per_cycle: float = 450.0
     manure_price_per_ton: float = 45.0
     live_bird_price_per_head: float = 1.5
     byproduct_price_per_kg: float = 0.35
@@ -62,7 +62,7 @@ ASSUMPTION_SCHEDULE_LAYOUT = [
     ("Production", "Feed conversion ratio", "feed_conversion_ratio"),
     ("Production", "Live price per kg", "live_price_per_kg"),
     ("Production", "Eggs price per dozen", "eggs_price_per_dozen"),
-    ("Production", "Eggs per cycle (default)", "eggs_per_cycle_default"),
+    ("Production", "Eggs per bird per cycle", "eggs_per_bird_per_cycle"),
     ("Production", "Manure price per ton", "manure_price_per_ton"),
     ("Production", "Live bird price per head", "live_bird_price_per_head"),
     ("Production", "By-product price per kg", "byproduct_price_per_kg"),

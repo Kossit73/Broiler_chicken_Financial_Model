@@ -1303,6 +1303,22 @@ def _extract_text_from_upload(uploaded_file: Any) -> Tuple[str, str, Optional[st
         else:
             _record_pdf_failure("tesseract binary unavailable")
 
+        # Dependency-free fallback: recover readable text segments directly from PDF bytes.
+        # This is not as accurate as parser libraries, but it prevents hard indexing failure
+        # when optional PDF dependencies are unavailable in a deployment environment.
+        try:
+            decoded = file_bytes.decode("latin-1", errors="ignore")
+            decoded = decoded.replace("\x00", " ")
+            decoded = re.sub(r"\s+", " ", decoded)
+            text_candidates = re.findall(r"[A-Za-z][A-Za-z0-9 ,.;:()\\-_/]{24,}", decoded)
+            if text_candidates:
+                extracted = "\n".join(text_candidates[:300]).strip()
+                if extracted:
+                    return extracted, "pdf-byte-fallback", None
+            _record_pdf_failure("pdf-byte-fallback returned empty text")
+        except Exception as exc:
+            _record_pdf_failure("pdf-byte-fallback failed", exc)
+
         details = "; ".join(pdf_failures[:6]) if pdf_failures else "No parser diagnostics available"
         return "", "pdf", (
             "No PDF parser/OCR could extract text "

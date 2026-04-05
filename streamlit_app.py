@@ -4344,7 +4344,7 @@ def main() -> None:
             expanded_uploads = _expand_uploaded_documents(uploaded_docs)
             for upload_entry in expanded_uploads:
                 file_name = upload_entry["name"]
-                payload = upload_entry["payload"]
+                file_payload = upload_entry["payload"]
                 if not upload_entry.get("supported", True):
                     parse_diagnostics.append(
                         {
@@ -4358,7 +4358,9 @@ def main() -> None:
                         }
                     )
                     continue
-                extracted, parser_used, parse_error = _extract_text_from_payload(file_name, payload)
+                extracted, parser_used, parse_error = _extract_text_from_payload(
+                    file_name, file_payload
+                )
                 if not extracted.strip():
                     st.warning(
                         f"Could not parse text for `{file_name}`. "

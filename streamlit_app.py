@@ -2481,6 +2481,64 @@ def _generate_excel_bytes(
                 )
         return safe
 
+    def _to_sheet_name(name: str) -> str:
+        cleaned = (
+            str(name)
+            .replace("[", "")
+            .replace("]", "")
+            .replace("(", "")
+            .replace(")", "")
+            .replace("/", " ")
+            .replace("\\", " ")
+            .replace(":", " ")
+            .replace("*", " ")
+            .replace("?", " ")
+        )
+        cleaned = " ".join(cleaned.split()).strip()
+        return (cleaned[:31] or "Sheet").strip()
+
+    def _add_xlsxwriter_chart(
+        writer: pd.ExcelWriter,
+        sheet_name: str,
+        data_frame: pd.DataFrame,
+        title: str,
+        chart_type: str = "line",
+        position: str = "J2",
+    ) -> None:
+        if engine != "xlsxwriter" or data_frame.empty:
+            return
+        workbook = writer.book
+        worksheet = writer.sheets.get(sheet_name)
+        if worksheet is None:
+            return
+        numeric_cols: List[int] = []
+        for idx, column in enumerate(data_frame.columns):
+            series = pd.to_numeric(data_frame[column], errors="coerce")
+            if series.notna().sum() > 0:
+                numeric_cols.append(idx)
+        if not numeric_cols:
+            return
+        category_col = 0
+        series_cols = [idx for idx in numeric_cols if idx != category_col][:3]
+        if not series_cols:
+            series_cols = numeric_cols[:1]
+        row_count = len(data_frame.index)
+        if row_count <= 0:
+            return
+        chart = workbook.add_chart({"type": chart_type})
+        for col_idx in series_cols:
+            chart.add_series(
+                {
+                    "name": [sheet_name, 0, col_idx],
+                    "categories": [sheet_name, 1, category_col, row_count, category_col],
+                    "values": [sheet_name, 1, col_idx, row_count, col_idx],
+                }
+            )
+        chart.set_title({"name": title})
+        chart.set_legend({"position": "bottom"})
+        chart.set_size({"width": 720, "height": 360})
+        worksheet.insert_chart(position, chart)
+
     try:
         with pd.ExcelWriter(buffer, engine=engine) as writer:
             _excel_ready_df(pd.DataFrame(results["assumptions_schedule"])).to_excel(
@@ -2517,26 +2575,112 @@ def _generate_excel_bytes(
             )
 
             advanced = results["advanced_analytics"]
-            _excel_ready_df(pd.DataFrame(advanced["metrics"])).to_excel(
-                writer, sheet_name="Advanced Metrics", index=False
+            advanced_sheet_frames: Dict[str, pd.DataFrame] = {
+                "Advanced Metrics": _excel_ready_df(pd.DataFrame(advanced.get("metrics", []))),
+                "DSCR": _excel_ready_df(pd.DataFrame(advanced.get("dscr", []))),
+                "Trend Analysis": _excel_ready_df(pd.DataFrame(advanced.get("trend", []))),
+                "Returns": _excel_ready_df(pd.DataFrame(advanced.get("returns", []))),
+                "Coverage": _excel_ready_df(pd.DataFrame(advanced.get("coverage", []))),
+                "Leverage": _excel_ready_df(pd.DataFrame(advanced.get("leverage", []))),
+                "What If": _excel_ready_df(pd.DataFrame(advanced.get("what_if", []))),
+                "Scenario Planning": _excel_ready_df(pd.DataFrame(advanced.get("scenario_planning", []))),
+                "Break Even": _excel_ready_df(pd.DataFrame(advanced.get("break_even", []))),
+                "Goal Seek": _excel_ready_df(pd.DataFrame([advanced.get("goal_seek", {})])),
+            }
+            predictive = advanced.get("predictive", {})
+            advanced_sheet_frames["Forecast"] = _excel_ready_df(
+                pd.DataFrame(predictive.get("automated_forecast", []))
             )
-            _excel_ready_df(pd.DataFrame(advanced["dscr"])).to_excel(
-                writer, sheet_name="DSCR", index=False
+            advanced_sheet_frames["Time Series"] = _excel_ready_df(
+                pd.DataFrame(predictive.get("time_series", {}).get("forecast", []))
             )
-            _excel_ready_df(pd.DataFrame(advanced["trend"])).to_excel(
-                writer, sheet_name="Trend Analysis", index=False
+            advanced_sheet_frames["Risk Observations"] = _excel_ready_df(
+                pd.DataFrame(predictive.get("risk_anomalies", {}).get("observations", []))
+            )
+            advanced_sheet_frames["ML Methods"] = _excel_ready_df(
+                pd.DataFrame(predictive.get("ml_methods", []))
+            )
+            monte_carlo = advanced.get("monte_carlo", {})
+            advanced_sheet_frames["Monte Carlo Summary"] = _excel_ready_df(
+                pd.DataFrame([monte_carlo.get("summary", {})])
+            )
+            advanced_sheet_frames["Monte Carlo Samples"] = _excel_ready_df(
+                pd.DataFrame(monte_carlo.get("samples", []))
             )
 
+            revenue_summary = summarise_revenue_totals(
+                results["revenue_schedules"],
+                model.assumptions.cycles_per_year,
+                model.assumptions.production_horizon_years,
+                model.assumptions.production_start_year,
+            )
+            advanced_sheet_frames["Revenue Annual Totals"] = _excel_ready_df(
+                pd.DataFrame(revenue_summary.get("annual_totals", []))
+            )
+            advanced_sheet_frames["Revenue By Category"] = _excel_ready_df(
+                pd.DataFrame(revenue_summary.get("by_category", []))
+            )
+
+            insight_rows = [
+                {"Insight": "NPV", "Value": results.get("valuation", {}).get("npv")},
+                {"Insight": "IRR", "Value": results.get("valuation", {}).get("irr")},
+                {"Insight": "Discount rate", "Value": results.get("valuation", {}).get("discount_rate")},
+                {"Insight": "Cycles per year", "Value": model.assumptions.cycles_per_year},
+                {"Insight": "Horizon years", "Value": model.assumptions.production_horizon_years},
+            ]
+            mc_summary = monte_carlo.get("summary", {}) if isinstance(monte_carlo, dict) else {}
+            for key in ("p10_npv", "p50_npv", "p90_npv", "mean_npv", "std_npv"):
+                if key in mc_summary:
+                    insight_rows.append({"Insight": f"Monte Carlo {key}", "Value": mc_summary.get(key)})
+            advanced_sheet_frames["Advanced Insights"] = _excel_ready_df(
+                pd.DataFrame(insight_rows)
+            )
+
+            for raw_name, frame in advanced_sheet_frames.items():
+                if frame.empty:
+                    continue
+                sheet_name = _to_sheet_name(raw_name)
+                frame.to_excel(writer, sheet_name=sheet_name, index=False)
+                if raw_name in {
+                    "Trend Analysis",
+                    "DSCR",
+                    "What If",
+                    "Scenario Planning",
+                    "Forecast",
+                    "Time Series",
+                    "Revenue Annual Totals",
+                    "Monte Carlo Samples",
+                }:
+                    chart_type = "line"
+                    if raw_name in {"What If", "Scenario Planning"}:
+                        chart_type = "column"
+                    if raw_name == "Monte Carlo Samples":
+                        chart_type = "scatter"
+                    _add_xlsxwriter_chart(
+                        writer,
+                        sheet_name,
+                        frame,
+                        title=f"{raw_name} Chart",
+                        chart_type=chart_type,
+                    )
+
             for category, rows in results["revenue_schedules"].items():
-                safe_name = (
-                    category.replace("(", "")
-                    .replace(")", "")
-                    .replace(",", "")
-                    .replace("-", " ")
+                safe_name = _to_sheet_name(
+                    " ".join(
+                        word.title()
+                        for word in category.replace(",", "").replace("-", " ").split()
+                    )
                 )
-                safe_name = " ".join(word.title() for word in safe_name.split())
-                _excel_ready_df(pd.DataFrame(rows)).to_excel(
-                    writer, sheet_name=safe_name[:31] or "Revenue", index=False
+                category_df = _excel_ready_df(pd.DataFrame(rows))
+                category_df.to_excel(
+                    writer, sheet_name=safe_name, index=False
+                )
+                _add_xlsxwriter_chart(
+                    writer,
+                    safe_name,
+                    category_df,
+                    title=f"{category} Trend",
+                    chart_type="line",
                 )
 
             ai_settings = st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS)

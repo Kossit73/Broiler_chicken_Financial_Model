@@ -4217,13 +4217,24 @@ def main() -> None:
 
 
     with ai_ml_tab:
-        st.header("AI & Machine Learning Settings")
-        st.caption("Configure model provider, forecast methods, and generative insights options.")
+        st.header("Unified AI System")
+        st.caption(
+            "Single integrated AI workflow combining settings, investor benchmarking, governance, "
+            "RAG research, model Q&A, and business-plan generation."
+        )
         _render_ai_settings(payload)
-        st.markdown("### Investor benchmark hurdles")
+        st.markdown("### Unified configuration")
         benchmark_defaults = payload.get(
             "investor_benchmarks", DEFAULT_INVESTOR_BENCHMARKS.copy()
         )
+        unified_ai_state: Dict[str, Any] = {
+            "config": {
+                "scenario": selected_scenario,
+                "ai_settings": payload.get("ai_settings", DEFAULT_AI_SETTINGS.copy()),
+            },
+            "inputs": {},
+            "outputs": {},
+        }
         bcol1, bcol2, bcol3 = st.columns(3)
         target_irr = bcol1.number_input(
             "Target IRR",
@@ -4254,6 +4265,7 @@ def main() -> None:
             "min_dscr": float(min_dscr),
             "max_payback_years": float(max_payback),
         }
+        unified_ai_state["config"]["investor_benchmarks"] = payload["investor_benchmarks"]
         st.session_state["scenario_store"][selected_scenario] = payload
 
         scorecard_df = _build_investor_scorecard(
@@ -4272,14 +4284,20 @@ def main() -> None:
             scorecard_df = scorecard_df.copy()
             scorecard_df["Benchmark"] = scorecard_df["Metric"].map(benchmark_map)
             scorecard_df["Benchmark"] = scorecard_df["Benchmark"].fillna("N/A")
-            st.markdown("### Investor scorecard")
+            st.markdown("### Unified output: investor scorecard")
             st.dataframe(scorecard_df, use_container_width=True, hide_index=True)
+        unified_ai_state["outputs"]["investor_scorecard_rows"] = int(
+            len(scorecard_df.index) if isinstance(scorecard_df, pd.DataFrame) else 0
+        )
 
-        st.markdown("### Assumption confidence bands")
+        st.markdown("### Unified output: assumption confidence bands")
         confidence_df = _build_assumption_confidence_frame(assumptions)
         st.dataframe(confidence_df, use_container_width=True, hide_index=True)
+        unified_ai_state["outputs"]["confidence_band_rows"] = int(
+            len(confidence_df.index) if isinstance(confidence_df, pd.DataFrame) else 0
+        )
 
-        st.markdown("### Model governance")
+        st.markdown("### Unified output: model governance")
         assumptions_hash = hashlib.sha256(
             json.dumps(payload.get("assumptions", {}), sort_keys=True).encode("utf-8")
         ).hexdigest()[:12]
@@ -4296,8 +4314,12 @@ def main() -> None:
             st.markdown("**Recent changes:**")
             for entry in governance_log[-5:]:
                 st.markdown(f"- {entry.get('timestamp')}: {entry.get('event')}")
+        unified_ai_state["outputs"]["governance"] = {
+            "assumptions_hash": assumptions_hash,
+            "recent_events": governance_log[-5:],
+        }
 
-        st.markdown("### RAG research library")
+        st.markdown("### Unified input: RAG research library")
         st.caption(
             "Upload research papers/documents to ground business-plan rewrites with evidence."
         )
@@ -4388,8 +4410,12 @@ def main() -> None:
         rag_docs = rag_store.get(selected_scenario, {}).get("documents", [])
         rag_chunks = rag_store.get(selected_scenario, {}).get("chunks", [])
         st.write(f"Indexed documents: **{len(rag_docs)}** | Chunks: **{len(rag_chunks)}**")
+        unified_ai_state["inputs"]["rag"] = {
+            "documents": len(rag_docs),
+            "chunks": len(rag_chunks),
+        }
 
-        st.markdown("### Model Q&A chatbox")
+        st.markdown("### Unified interaction: model Q&A chatbox")
         st.caption(
             "Ask a question and get an answer strictly from this scenario's model outputs."
         )
@@ -4403,36 +4429,37 @@ def main() -> None:
             "Ask a question about this model scenario...",
             key=f"model_chat_input_{selected_scenario}",
         )
+        qa_context_frames: Dict[str, pd.DataFrame] = {
+            "Assumptions schedule": assumption_schedule_df,
+            "Annual summary": annual_df,
+            "Valuation": valuation_df,
+            "Cash flows": cashflow_df,
+            "Income statement": income_df,
+            "Balance sheet": balance_df,
+            "Cash flow statement": cash_statement_df,
+            "Debt schedule": loan_df,
+            "Advanced metrics": metrics_df,
+            "DSCR": dscr_df,
+            "Trend analysis": trend_df,
+            "Coverage analysis": coverage_df,
+            "Leverage analysis": leverage_df,
+            "What-if analysis": what_if_df,
+            "Break-even analysis": break_even_df,
+            "Forecast projections": forecast_df,
+            "Time-series forecast": time_series_df,
+            "Scenario planning": scenario_df,
+            "Risk observations": risk_df,
+            "ML methods": ml_methods_df,
+            "Monte Carlo summary": monte_carlo_summary_df,
+            "Monte Carlo samples": monte_carlo_samples_df,
+            "Revenue by category": summary_by_category,
+            "Revenue annual totals": annual_totals_df,
+        }
+        for category, rows in revenue_schedules.items():
+            qa_context_frames[f"Revenue schedule - {category}"] = pd.DataFrame(rows)
+        unified_ai_state["inputs"]["context_tables"] = sorted(qa_context_frames.keys())
         if prompt:
             chat_history.append({"role": "user", "content": prompt})
-            qa_context_frames: Dict[str, pd.DataFrame] = {
-                "Assumptions schedule": assumption_schedule_df,
-                "Annual summary": annual_df,
-                "Valuation": valuation_df,
-                "Cash flows": cashflow_df,
-                "Income statement": income_df,
-                "Balance sheet": balance_df,
-                "Cash flow statement": cash_statement_df,
-                "Debt schedule": loan_df,
-                "Advanced metrics": metrics_df,
-                "DSCR": dscr_df,
-                "Trend analysis": trend_df,
-                "Coverage analysis": coverage_df,
-                "Leverage analysis": leverage_df,
-                "What-if analysis": what_if_df,
-                "Break-even analysis": break_even_df,
-                "Forecast projections": forecast_df,
-                "Time-series forecast": time_series_df,
-                "Scenario planning": scenario_df,
-                "Risk observations": risk_df,
-                "ML methods": ml_methods_df,
-                "Monte Carlo summary": monte_carlo_summary_df,
-                "Monte Carlo samples": monte_carlo_samples_df,
-                "Revenue by category": summary_by_category,
-                "Revenue annual totals": annual_totals_df,
-            }
-            for category, rows in revenue_schedules.items():
-                qa_context_frames[f"Revenue schedule - {category}"] = pd.DataFrame(rows)
             answer = _answer_model_question(
                 prompt,
                 qa_context_frames,
@@ -4445,7 +4472,7 @@ def main() -> None:
             _rerun()
 
         st.divider()
-        st.subheader("Business Plan Agent")
+        st.subheader("Unified output: Business Plan Agent")
         st.caption(
             "Generate a comprehensive, investor-ready business plan with automated analysis "
             "and visual exhibits derived from the live model outputs."
@@ -4699,6 +4726,16 @@ def main() -> None:
             if mc_chart is not None:
                 st.markdown("#### NPV risk distribution")
                 st.altair_chart(mc_chart, use_container_width=True)
+
+        unified_ai_state["outputs"]["chat_messages"] = len(chat_history)
+        unified_ai_state["outputs"]["business_plan_enabled"] = bool(
+            st.session_state.get(plan_state_key, False)
+        )
+        unified_ai_state["outputs"]["timestamp_utc"] = datetime.now(
+            timezone.utc
+        ).isoformat()
+        payload["ai_unified_system"] = unified_ai_state
+        st.session_state["scenario_store"][selected_scenario] = payload
 
     analytics_namespace = "advanced_schedule_state"
 

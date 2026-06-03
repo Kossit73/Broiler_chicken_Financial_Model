@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 from pathlib import Path
+import sys
 from typing import Dict, Iterable
 
 from broiler_model import (
@@ -18,6 +19,9 @@ from broiler_model import (
     write_csv,
     write_json,
 )
+
+if hasattr(sys.stdout, "reconfigure"):  # pragma: no cover - platform guard
+    sys.stdout.reconfigure(encoding="utf-8")
 
 
 def _export_csv(

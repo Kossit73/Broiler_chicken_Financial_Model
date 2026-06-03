@@ -5,9 +5,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 
+from openpyxl import load_workbook
+
 from broiler_model.assumptions import Assumptions
+from broiler_model.exporter import generate_excel_workbook
 from broiler_model.model import generate_model_outputs
 from broiler_model.production import (
     build_revenue_schedules,
@@ -143,6 +147,27 @@ class CLIBaselineRegressionTests(unittest.TestCase):
                 first_row = next(reader)
 
             self.assertAlmostEqual(float(first_row["dscr"]), 0.8973, delta=0.02)
+
+
+class WorkbookExportTests(unittest.TestCase):
+    def test_generate_excel_workbook_contains_redesigned_sheets(self) -> None:
+        assumptions = Assumptions()
+        results = generate_model_outputs(assumptions, analytics_plan=AnalyticsPlan.summary())
+
+        workbook_bytes = generate_excel_workbook(
+            assumptions,
+            results,
+            "Baseline",
+            ai_settings={"provider": "openai", "model": "gpt-4o-mini"},
+        )
+
+        workbook = load_workbook(BytesIO(workbook_bytes), data_only=False)
+        self.assertIn("Overview", workbook.sheetnames)
+        self.assertIn("Revenue Dashboard", workbook.sheetnames)
+        self.assertIn("Assumptions", workbook.sheetnames)
+        self.assertIn("Production Cycles", workbook.sheetnames)
+        self.assertEqual(workbook["Overview"]["B2"].value, "Broiler Chicken Financial Model  |  Baseline")
+        self.assertEqual(workbook["Revenue Dashboard"]["B2"].value, "Revenue Mix Dashboard")
 
 
 if __name__ == "__main__":  # pragma: no cover

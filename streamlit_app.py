@@ -39,6 +39,7 @@ from broiler_model.config import (
     load_custom_simulation_definitions,
     load_monte_carlo_distributions,
 )
+from broiler_model.exporter import generate_excel_workbook
 from broiler_model.model import generate_model_outputs
 from broiler_model.production import summarise_revenue_totals
 
@@ -474,6 +475,170 @@ def _format_ratio(value: Any, digits: int = 2) -> str:
     except (TypeError, ValueError):
         return "N/A"
     return f"{numeric:.{digits}f}x"
+
+
+def _inject_app_theme() -> None:
+    """Apply a cassava-style visual shell to the broiler dashboard."""
+
+    st.markdown(
+        """
+        <style>
+        :root {
+            --broiler-ink: #183028;
+            --broiler-green: #234a37;
+            --broiler-green-deep: #162d23;
+            --broiler-gold: #c38b2f;
+            --broiler-sand: #f5efe1;
+            --broiler-mist: #edf3ee;
+            --broiler-line: #d8c7a4;
+        }
+
+        [data-testid="stAppViewContainer"] {
+            background:
+                radial-gradient(circle at top left, rgba(195, 139, 47, 0.10), transparent 28%),
+                linear-gradient(180deg, #fbf8f2 0%, #f3efe7 42%, #eef4ee 100%);
+        }
+
+        .block-container {
+            max-width: 1380px;
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+        }
+
+        .broiler-hero {
+            background:
+                linear-gradient(135deg, rgba(22, 45, 35, 0.97), rgba(35, 74, 55, 0.94)),
+                linear-gradient(90deg, rgba(195, 139, 47, 0.25), transparent);
+            border: 1px solid rgba(216, 199, 164, 0.45);
+            border-radius: 28px;
+            padding: 1.6rem 1.8rem 1.4rem 1.8rem;
+            box-shadow: 0 18px 40px rgba(24, 48, 40, 0.12);
+            margin-bottom: 1.2rem;
+            color: #ffffff;
+        }
+
+        .broiler-hero h1 {
+            margin: 0.2rem 0 0.55rem 0;
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: 2.2rem;
+            letter-spacing: -0.03em;
+        }
+
+        .broiler-hero p {
+            margin: 0;
+            max-width: 920px;
+            line-height: 1.55;
+            color: rgba(255, 255, 255, 0.88);
+            font-size: 0.98rem;
+        }
+
+        .broiler-chip {
+            display: inline-block;
+            padding: 0.35rem 0.7rem;
+            border-radius: 999px;
+            background: rgba(195, 139, 47, 0.18);
+            border: 1px solid rgba(195, 139, 47, 0.35);
+            color: #f8e6b8;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+
+        .broiler-meta {
+            margin-top: 0.95rem;
+            color: rgba(255, 255, 255, 0.82);
+            font-size: 0.9rem;
+        }
+
+        .broiler-panel {
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(216, 199, 164, 0.7);
+            border-radius: 22px;
+            padding: 1rem 1.1rem;
+            box-shadow: 0 10px 24px rgba(24, 48, 40, 0.05);
+        }
+
+        .broiler-section-head {
+            margin: 1.2rem 0 0.25rem 0;
+            color: var(--broiler-green-deep);
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: 1.35rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .broiler-section-desc {
+            margin: 0 0 0.95rem 0;
+            color: #4b6357;
+            line-height: 1.5;
+            font-size: 0.94rem;
+        }
+
+        div[data-testid="stMetric"] {
+            background: rgba(255, 250, 240, 0.92);
+            border: 1px solid rgba(216, 199, 164, 0.85);
+            border-radius: 18px;
+            padding: 0.85rem 1rem;
+            box-shadow: 0 8px 20px rgba(24, 48, 40, 0.05);
+        }
+
+        div[data-testid="stMetricLabel"] {
+            color: #4f6458;
+            font-weight: 700;
+        }
+
+        div[data-testid="stMetricValue"] {
+            color: var(--broiler-green-deep);
+            font-family: Georgia, "Times New Roman", serif;
+        }
+
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.35rem;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(216, 199, 164, 0.75);
+            color: #365344;
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
+
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(135deg, #234a37, #2d6146) !important;
+            color: #ffffff !important;
+            border-color: #234a37 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_model_hero(selected_scenario: str) -> None:
+    """Render the redesigned top-of-page hero banner."""
+
+    st.markdown(
+        f"""
+        <section class="broiler-hero">
+            <span class="broiler-chip">Broiler Strategy Studio</span>
+            <h1>Broiler Chicken Financial Model</h1>
+            <p>
+                A redesigned operating cockpit aligned to the cassava-ethanol model structure:
+                centralised input landing page, cleaner analytical flow, and a presentation-grade
+                Excel workbook for lenders, investors, and internal management.
+            </p>
+            <div class="broiler-meta">
+                Active scenario: <strong>{selected_scenario}</strong> |
+                Export-ready workbook includes an executive overview, styled schedules,
+                and chart-backed financial summaries.
+            </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _build_income_composition_chart(income_df: pd.DataFrame) -> Optional[alt.Chart]:
@@ -2449,265 +2614,20 @@ def _normalize_scenario_payload(payload: Any) -> Dict[str, Any]:
 def _generate_excel_bytes(
     model: ScenarioModel, results: Dict[str, Any], scenario: str
 ) -> bytes:
-    """Create an Excel workbook in memory for the supplied scenario results."""
+    """Create a formatted Excel workbook in memory for the supplied scenario results."""
 
-    buffer = BytesIO()
     try:
-        import xlsxwriter  # type: ignore  # noqa: F401
-
-        engine = "xlsxwriter"
-    except ImportError:
-        try:
-            import openpyxl  # type: ignore  # noqa: F401
-
-            engine = "openpyxl"
-        except ImportError as exc:  # pragma: no cover - surfaced in UI
-            st.error(
-                "Excel exports require either the `xlsxwriter` or `openpyxl` package. "
-                "Install dependencies from `requirements.txt` and try again."
-            )
-            raise RuntimeError("Missing Excel writer dependency") from exc
-
-    def _excel_ready_df(frame: pd.DataFrame) -> pd.DataFrame:
-        safe = frame.copy()
-        if safe.empty:
-            return safe
-        for column in safe.columns:
-            if safe[column].dtype == object:
-                safe[column] = safe[column].apply(
-                    lambda value: json.dumps(value)
-                    if isinstance(value, (dict, list, tuple, set))
-                    else value
-                )
-        return safe
-
-    def _to_sheet_name(name: str) -> str:
-        cleaned = (
-            str(name)
-            .replace("[", "")
-            .replace("]", "")
-            .replace("(", "")
-            .replace(")", "")
-            .replace("/", " ")
-            .replace("\\", " ")
-            .replace(":", " ")
-            .replace("*", " ")
-            .replace("?", " ")
+        return generate_excel_workbook(
+            model.assumptions,
+            results,
+            scenario,
+            ai_settings=st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS),
         )
-        cleaned = " ".join(cleaned.split()).strip()
-        return (cleaned[:31] or "Sheet").strip()
-
-    def _add_xlsxwriter_chart(
-        writer: pd.ExcelWriter,
-        sheet_name: str,
-        data_frame: pd.DataFrame,
-        title: str,
-        chart_type: str = "line",
-        position: str = "J2",
-    ) -> None:
-        if engine != "xlsxwriter" or data_frame.empty:
-            return
-        workbook = writer.book
-        worksheet = writer.sheets.get(sheet_name)
-        if worksheet is None:
-            return
-        numeric_cols: List[int] = []
-        for idx, column in enumerate(data_frame.columns):
-            series = pd.to_numeric(data_frame[column], errors="coerce")
-            if series.notna().sum() > 0:
-                numeric_cols.append(idx)
-        if not numeric_cols:
-            return
-        category_col = 0
-        series_cols = [idx for idx in numeric_cols if idx != category_col][:3]
-        if not series_cols:
-            series_cols = numeric_cols[:1]
-        row_count = len(data_frame.index)
-        if row_count <= 0:
-            return
-        chart = workbook.add_chart({"type": chart_type})
-        for col_idx in series_cols:
-            chart.add_series(
-                {
-                    "name": [sheet_name, 0, col_idx],
-                    "categories": [sheet_name, 1, category_col, row_count, category_col],
-                    "values": [sheet_name, 1, col_idx, row_count, col_idx],
-                }
-            )
-        chart.set_title({"name": title})
-        chart.set_legend({"position": "bottom"})
-        chart.set_size({"width": 720, "height": 360})
-        worksheet.insert_chart(position, chart)
-
-    try:
-        with pd.ExcelWriter(buffer, engine=engine) as writer:
-            _excel_ready_df(pd.DataFrame(results["assumptions_schedule"])).to_excel(
-                writer, sheet_name="Assumptions", index=False
-            )
-            _excel_ready_df(pd.DataFrame([asdict(model.assumptions)])).to_excel(
-                writer, sheet_name="Input Values", index=False
-            )
-            _excel_ready_df(pd.DataFrame([asdict(cycle) for cycle in results["cycles"]])).to_excel(
-                writer, sheet_name="Production Cycles", index=False
-            )
-            _excel_ready_df(pd.DataFrame([asdict(results["annual"])])).to_excel(
-                writer, sheet_name="Annual Summary", index=False
-            )
-            _excel_ready_df(pd.DataFrame([asdict(row) for row in results["cashflows"]])).to_excel(
-                writer, sheet_name="Cash Flows", index=False
-            )
-            _excel_ready_df(pd.DataFrame([results["valuation"]])).to_excel(
-                writer, sheet_name="Valuation", index=False
-            )
-
-            financials = results["financial_statements"]
-            _excel_ready_df(pd.DataFrame([asdict(row) for row in financials["income_statement"]])).to_excel(
-                writer, sheet_name="Income Statement", index=False
-            )
-            _excel_ready_df(pd.DataFrame([asdict(row) for row in financials["balance_sheet"]])).to_excel(
-                writer, sheet_name="Balance Sheet", index=False
-            )
-            _excel_ready_df(pd.DataFrame([asdict(row) for row in financials["cash_flow_statement"]])).to_excel(
-                writer, sheet_name="Cash Flow Statement", index=False
-            )
-            _excel_ready_df(pd.DataFrame(financials["loan_schedule"])).to_excel(
-                writer, sheet_name="Debt Schedule", index=False
-            )
-
-            advanced = results["advanced_analytics"]
-            advanced_sheet_frames: Dict[str, pd.DataFrame] = {
-                "Advanced Metrics": _excel_ready_df(pd.DataFrame(advanced.get("metrics", []))),
-                "DSCR": _excel_ready_df(pd.DataFrame(advanced.get("dscr", []))),
-                "Trend Analysis": _excel_ready_df(pd.DataFrame(advanced.get("trend", []))),
-                "Returns": _excel_ready_df(pd.DataFrame(advanced.get("returns", []))),
-                "Coverage": _excel_ready_df(pd.DataFrame(advanced.get("coverage", []))),
-                "Leverage": _excel_ready_df(pd.DataFrame(advanced.get("leverage", []))),
-                "What If": _excel_ready_df(pd.DataFrame(advanced.get("what_if", []))),
-                "Scenario Planning": _excel_ready_df(pd.DataFrame(advanced.get("scenario_planning", []))),
-                "Break Even": _excel_ready_df(pd.DataFrame(advanced.get("break_even", []))),
-                "Goal Seek": _excel_ready_df(pd.DataFrame([advanced.get("goal_seek", {})])),
-            }
-            predictive = advanced.get("predictive", {})
-            advanced_sheet_frames["Forecast"] = _excel_ready_df(
-                pd.DataFrame(predictive.get("automated_forecast", []))
-            )
-            advanced_sheet_frames["Time Series"] = _excel_ready_df(
-                pd.DataFrame(predictive.get("time_series", {}).get("forecast", []))
-            )
-            advanced_sheet_frames["Risk Observations"] = _excel_ready_df(
-                pd.DataFrame(predictive.get("risk_anomalies", {}).get("observations", []))
-            )
-            advanced_sheet_frames["ML Methods"] = _excel_ready_df(
-                pd.DataFrame(predictive.get("ml_methods", []))
-            )
-            monte_carlo = advanced.get("monte_carlo", {})
-            advanced_sheet_frames["Monte Carlo Summary"] = _excel_ready_df(
-                pd.DataFrame([monte_carlo.get("summary", {})])
-            )
-            advanced_sheet_frames["Monte Carlo Samples"] = _excel_ready_df(
-                pd.DataFrame(monte_carlo.get("samples", []))
-            )
-
-            revenue_summary = summarise_revenue_totals(
-                results["revenue_schedules"],
-                model.assumptions.cycles_per_year,
-                model.assumptions.production_horizon_years,
-                model.assumptions.production_start_year,
-            )
-            advanced_sheet_frames["Revenue Annual Totals"] = _excel_ready_df(
-                pd.DataFrame(revenue_summary.get("annual_totals", []))
-            )
-            advanced_sheet_frames["Revenue By Category"] = _excel_ready_df(
-                pd.DataFrame(revenue_summary.get("by_category", []))
-            )
-
-            insight_rows = [
-                {"Insight": "NPV", "Value": results.get("valuation", {}).get("npv")},
-                {"Insight": "IRR", "Value": results.get("valuation", {}).get("irr")},
-                {"Insight": "Discount rate", "Value": results.get("valuation", {}).get("discount_rate")},
-                {"Insight": "Cycles per year", "Value": model.assumptions.cycles_per_year},
-                {"Insight": "Horizon years", "Value": model.assumptions.production_horizon_years},
-            ]
-            mc_summary = monte_carlo.get("summary", {}) if isinstance(monte_carlo, dict) else {}
-            for key in ("p10_npv", "p50_npv", "p90_npv", "mean_npv", "std_npv"):
-                if key in mc_summary:
-                    insight_rows.append({"Insight": f"Monte Carlo {key}", "Value": mc_summary.get(key)})
-            advanced_sheet_frames["Advanced Insights"] = _excel_ready_df(
-                pd.DataFrame(insight_rows)
-            )
-
-            for raw_name, frame in advanced_sheet_frames.items():
-                if frame.empty:
-                    continue
-                sheet_name = _to_sheet_name(raw_name)
-                frame.to_excel(writer, sheet_name=sheet_name, index=False)
-                if raw_name in {
-                    "Trend Analysis",
-                    "DSCR",
-                    "What If",
-                    "Scenario Planning",
-                    "Forecast",
-                    "Time Series",
-                    "Revenue Annual Totals",
-                    "Monte Carlo Samples",
-                }:
-                    chart_type = "line"
-                    if raw_name in {"What If", "Scenario Planning"}:
-                        chart_type = "column"
-                    if raw_name == "Monte Carlo Samples":
-                        chart_type = "scatter"
-                    _add_xlsxwriter_chart(
-                        writer,
-                        sheet_name,
-                        frame,
-                        title=f"{raw_name} Chart",
-                        chart_type=chart_type,
-                    )
-
-            for category, rows in results["revenue_schedules"].items():
-                safe_name = _to_sheet_name(
-                    " ".join(
-                        word.title()
-                        for word in category.replace(",", "").replace("-", " ").split()
-                    )
-                )
-                category_df = _excel_ready_df(pd.DataFrame(rows))
-                category_df.to_excel(
-                    writer, sheet_name=safe_name, index=False
-                )
-                _add_xlsxwriter_chart(
-                    writer,
-                    safe_name,
-                    category_df,
-                    title=f"{category} Trend",
-                    chart_type="line",
-                )
-
-            ai_settings = st.session_state.get("ai_settings", DEFAULT_AI_SETTINGS)
-            _excel_ready_df(pd.DataFrame([ai_settings])).to_excel(
-                writer, sheet_name="AI Settings", index=False
-            )
-
-            workbook = writer.book
-            if engine == "xlsxwriter":
-                workbook.set_properties(
-                    {
-                        "title": f"Broiler Model - {scenario}",
-                        "subject": "Broiler chicken financial model",
-                        "comments": "Generated via Streamlit dashboard",
-                    }
-                )
-            else:
-                props = workbook.properties
-                props.title = f"Broiler Model - {scenario}"
-                props.subject = "Broiler chicken financial model"
-                props.comments = "Generated via Streamlit dashboard"
+    except RuntimeError:
+        raise
     except Exception as exc:  # pragma: no cover - surfaced in UI
         st.error(f"Excel export failed due to serialization issue: {exc}")
         raise RuntimeError("Excel export serialization failure") from exc
-
-    buffer.seek(0)
-    return buffer.getvalue()
 
 
 def _excel_dependency_health() -> Dict[str, Any]:
@@ -3350,10 +3270,16 @@ def _render_input_section(
     values: Dict[str, Any],
     *,
     columns: int = 3,
+    description: str | None = None,
 ) -> None:
     """Render a consistently styled multi-column assumptions section."""
 
-    st.markdown(f"### {title}")
+    st.markdown(f'<div class="broiler-section-head">{title}</div>', unsafe_allow_html=True)
+    if description:
+        st.markdown(
+            f'<div class="broiler-section-desc">{description}</div>',
+            unsafe_allow_html=True,
+        )
     for group in _chunked(fields, columns):
         cols = st.columns(len(group))
         for widget, field in zip(cols, group):
@@ -3764,12 +3690,21 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
 
 
 def assumptions_form(defaults: Assumptions) -> Assumptions:
-    st.header("Model assumptions")
+    st.markdown(
+        """
+        <div class="broiler-panel">
+            <div class="broiler-section-head" style="margin-top:0;">Input Landing Page</div>
+            <div class="broiler-section-desc">
+                Adjust the core operating, pricing, cost, and financing assumptions here.
+                The layout mirrors the cassava-ethanol model structure so inputs read like a
+                proper investment memo rather than a utility form.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     farm_name = st.text_input("Farm name", defaults.farm_name)
-
-    st.subheader("Input Landing Page")
-    st.caption("Adjust the production, pricing, cost, and capital structure assumptions below.")
 
     values: Dict[str, Any] = {}
 
@@ -3820,6 +3755,10 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
         defaults,
         values,
         columns=4,
+        description=(
+            "Define the production timeline, flock scale, biological performance, "
+            "and the core output assumptions that drive all downstream schedules."
+        ),
     )
 
     _render_input_section(
@@ -3879,6 +3818,10 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
         defaults,
         values,
         columns=3,
+        description=(
+            "Set the commercial assumptions for each revenue stream and the annual "
+            "pricing escalation used across the projection horizon."
+        ),
     )
 
     _render_input_section(
@@ -3987,6 +3930,10 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
         defaults,
         values,
         columns=4,
+        description=(
+            "Capture feed, chick, utilities, labor, and shared overhead costs in one "
+            "structured operating-cost block for cleaner margin analysis."
+        ),
     )
 
     _render_input_section(
@@ -4083,6 +4030,10 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
         defaults,
         values,
         columns=4,
+        description=(
+            "Control project funding, depreciation, working capital timing, and "
+            "discounting assumptions used in valuation and debt-service analysis."
+        ),
     )
 
     assumptions = Assumptions(
@@ -4142,11 +4093,20 @@ def assumptions_form(defaults: Assumptions) -> Assumptions:
     return assumptions
 def main() -> None:
     st.set_page_config(page_title="Broiler Chicken Financial Model", layout="wide")
-    st.title("Broiler Chicken Financial Model")
-    st.caption("Interactively explore production, operating, and financing assumptions for a broiler chicken farm.")
+    _inject_app_theme()
 
-    st.subheader("Scenario selection")
     selected_scenario = st.selectbox("Scenario", SCENARIO_OPTIONS, key="selected_scenario")
+    _render_model_hero(selected_scenario)
+    st.markdown(
+        """
+        <div class="broiler-panel" style="margin-bottom:1rem;">
+            <strong style="color:#183028;">Workflow</strong><br/>
+            Start on the Input Landing Page, refine the production and financing case,
+            then move through revenues, statements, analytics, and the workbook export.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     scenario_store = st.session_state.setdefault("scenario_store", {})
     if selected_scenario not in scenario_store:

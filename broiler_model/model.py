@@ -38,7 +38,7 @@ def write_csv(path: Path, rows: Iterable[Dict[str, Any]]):
     if not rows:
         return
     fieldnames: List[str] = list({}.fromkeys(key for row in rows for key in row.keys()))
-    with path.open("w", newline="") as fh:
+    with path.open("w", newline="", encoding="utf-8") as fh:
         import csv
 
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -47,8 +47,8 @@ def write_csv(path: Path, rows: Iterable[Dict[str, Any]]):
 
 
 def write_json(path: Path, data: Any):
-    with path.open("w") as fh:
-        json.dump(data, fh, indent=2)
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
 
 
 def generate_model_outputs(

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .assumptions import Assumptions, build_assumptions_schedule
+from .detail_schedules import prepare_detail_context
 from .production import (
     AnnualSummary,
     CycleResults,
@@ -54,6 +55,7 @@ def write_json(path: Path, data: Any):
 def generate_model_outputs(
     assumptions: Assumptions,
     *,
+    detail_schedules: Optional[Dict[str, Any]] = None,
     custom_simulation_path: Optional[Path] = None,
     monte_carlo_config_path: Optional[Path] = None,
     analytics_plan: Optional[AnalyticsPlan] = None,
@@ -69,26 +71,45 @@ def generate_model_outputs(
         if plan.include_monte_carlo or monte_carlo_config_path
         else []
     )
-    assumption_schedule = build_assumptions_schedule(assumptions)
-    cycles = compute_cycles(assumptions)
-    annual = annual_summary(assumptions, cycles)
-    cashflows, loan_schedule = discounted_cash_flow(assumptions, annual)
-    revenue_schedules = build_revenue_schedules(assumptions, cycles)
+    resolved_assumptions, detail_context = prepare_detail_context(
+        assumptions,
+        detail_schedules,
+    )
+    assumption_schedule = build_assumptions_schedule(resolved_assumptions)
+    cycles = compute_cycles(resolved_assumptions)
+    annual = annual_summary(
+        resolved_assumptions,
+        cycles,
+        annual_depreciation=detail_context["annual_depreciation"],
+    )
+    cashflows, loan_schedule = discounted_cash_flow(
+        resolved_assumptions,
+        annual,
+        debt_facilities=detail_context["schedules"].get("debt_facilities"),
+    )
+    revenue_schedules = build_revenue_schedules(resolved_assumptions, cycles)
     revenue_summary = summarise_revenue_totals(
         revenue_schedules,
-        assumptions.cycles_per_year,
-        assumptions.production_horizon_years,
-        assumptions.production_start_year,
+        resolved_assumptions.cycles_per_year,
+        resolved_assumptions.production_horizon_years,
+        resolved_assumptions.production_start_year,
     )
     timeline = {
-        "start_year": assumptions.production_start_year,
-        "end_year": assumptions.production_start_year
-        + max(assumptions.production_horizon_years - 1, 0),
-        "projection_years": max(assumptions.production_horizon_years, 1),
+        "start_year": resolved_assumptions.production_start_year,
+        "end_year": resolved_assumptions.production_start_year
+        + max(resolved_assumptions.production_horizon_years - 1, 0),
+        "projection_years": max(resolved_assumptions.production_horizon_years, 1),
     }
-    financials = build_financial_statements(assumptions, cashflows, loan_schedule)
+    financials = build_financial_statements(
+        resolved_assumptions,
+        cashflows,
+        loan_schedule,
+        annual_depreciation=detail_context["annual_depreciation"],
+        opening_total_capex=detail_context["capex_totals"]["total"],
+        asset_book_summary=detail_context.get("asset_book_summary"),
+    )
     advanced = compute_advanced_analytics(
-        assumptions,
+        resolved_assumptions,
         cashflows,
         financials["income_statement"],
         financials["balance_sheet"],
@@ -101,7 +122,7 @@ def generate_model_outputs(
     )
 
     valuation_cashflows = [row.free_cash_flow for row in cashflows]
-    discount_rate = assumptions.discount_rate
+    discount_rate = resolved_assumptions.discount_rate
     model_npv = npv(discount_rate, valuation_cashflows)
     model_irr = irr(valuation_cashflows)
 
@@ -116,8 +137,19 @@ def generate_model_outputs(
     }
 
     return {
-        "assumptions": assumptions,
+        "assumptions": resolved_assumptions if detail_schedules else assumptions,
         "assumptions_schedule": assumption_schedule,
+        "detail_schedules": detail_context["schedules"],
+        "detail_schedule_outputs": {
+            "equipment_capex": detail_context["schedules"]["equipment_capex"],
+            "housing_capex": detail_context["schedules"]["housing_capex"],
+            "labor": detail_context["schedules"]["labor"],
+            "maintenance": detail_context["schedules"]["maintenance"],
+            "management_fee": detail_context["schedules"]["management_fee"],
+            "debt_facilities": detail_context["schedules"]["debt_facilities"],
+            "asset_book_schedule": detail_context.get("asset_book_schedule", []),
+            "asset_book_summary": detail_context.get("asset_book_summary", []),
+        },
         "cycles": cycles,
         "annual": annual,
         "cashflows": cashflows,

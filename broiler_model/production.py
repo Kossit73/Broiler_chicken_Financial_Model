@@ -127,11 +127,17 @@ def compute_cycles(assumptions: Assumptions) -> List[CycleResults]:
 
 
 def annual_summary(
-    assumptions: Assumptions, cycles: Iterable[CycleResults]
+    assumptions: Assumptions,
+    cycles: Iterable[CycleResults],
+    *,
+    annual_depreciation: float | None = None,
 ) -> AnnualSummary:
     depreciation = (
-        assumptions.capex_housing + assumptions.capex_equipment
-    ) / assumptions.depreciation_years
+        float(annual_depreciation)
+        if annual_depreciation is not None
+        else (assumptions.capex_housing + assumptions.capex_equipment)
+        / assumptions.depreciation_years
+    )
     totals = {
         "revenue": 0.0,
         "feed_cost": 0.0,

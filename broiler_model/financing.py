@@ -89,22 +89,65 @@ def _pmt(rate: float, term_years: int, principal: float) -> float:
 
 
 def amortization_schedule(
-    principal: float, rate: float, term_years: int
+    principal: float,
+    rate: float,
+    term_years: int,
+    *,
+    grace_years: int = 0,
+    start_year: int = 1,
+    repayment_type: str = "annuity",
+    loan_name: str = "Loan",
+    facility_type: str = "Term loan",
 ) -> List[Dict[str, float]]:
     if principal <= 0 or term_years <= 0:
         return []
     rate = float(rate)
-    payment = _pmt(rate, term_years, principal)
+    grace_years = max(0, min(int(grace_years), int(term_years) - 1))
+    start_year = max(int(start_year), 1)
+    repayment_type = str(repayment_type or "annuity").lower()
+    if repayment_type not in {"annuity", "straight_line", "interest_only", "bullet"}:
+        repayment_type = "annuity"
+
+    amortizing_years = max(term_years - grace_years, 1)
+    payment = _pmt(rate, amortizing_years, principal) if repayment_type == "annuity" else 0.0
     schedule = []
     balance = principal
-    for year in range(1, term_years + 1):
+    for loan_year in range(1, term_years + 1):
         interest = balance * rate
-        principal_paid = payment - interest
+        principal_paid = 0.0
+        payment_amount = 0.0
+        if loan_year <= grace_years:
+            payment_amount = interest
+        elif repayment_type == "annuity":
+            payment_amount = payment
+            principal_paid = payment_amount - interest
+        elif repayment_type == "straight_line":
+            principal_paid = principal / amortizing_years
+            payment_amount = interest + principal_paid
+        elif repayment_type == "interest_only":
+            if loan_year < term_years:
+                payment_amount = interest
+            else:
+                principal_paid = balance
+                payment_amount = interest + principal_paid
+        elif repayment_type == "bullet":
+            if loan_year < term_years:
+                payment_amount = interest
+            else:
+                principal_paid = balance
+                payment_amount = interest + principal_paid
+
+        principal_paid = min(max(principal_paid, 0.0), balance)
         balance = max(0.0, balance - principal_paid)
+        project_year = start_year + loan_year - 1
         schedule.append(
             {
-                "year": year,
-                "payment": payment,
+                "year": project_year,
+                "loan_year": loan_year,
+                "loan_name": loan_name,
+                "facility_type": facility_type,
+                "repayment_type": repayment_type,
+                "payment": payment_amount,
                 "interest": interest,
                 "principal": principal_paid,
                 "balance": balance,
@@ -113,15 +156,66 @@ def amortization_schedule(
     return schedule
 
 
+def _aggregate_loan_schedule(
+    loan_rows: Iterable[Dict[str, float]], projection_years: int
+) -> List[Dict[str, float]]:
+    buckets: Dict[int, Dict[str, float]] = {}
+    for row in loan_rows:
+        year = int(row.get("year", 0))
+        bucket = buckets.setdefault(
+            year,
+            {
+                "year": year,
+                "payment": 0.0,
+                "interest": 0.0,
+                "principal": 0.0,
+                "balance": 0.0,
+                "loans_active": 0.0,
+            },
+        )
+        bucket["payment"] += float(row.get("payment", 0.0))
+        bucket["interest"] += float(row.get("interest", 0.0))
+        bucket["principal"] += float(row.get("principal", 0.0))
+        bucket["balance"] += float(row.get("balance", 0.0))
+        bucket["loans_active"] += 1.0
+    return [buckets[year] for year in range(1, max(int(projection_years), 1) + 1) if year in buckets]
+
+
 def discounted_cash_flow(
-    assumptions: Assumptions, base_annual: AnnualSummary
+    assumptions: Assumptions,
+    base_annual: AnnualSummary,
+    *,
+    debt_facilities: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[CashFlowRow], List[Dict[str, float]]]:
     total_capex = assumptions.capex_housing + assumptions.capex_equipment
-    equity = total_capex * (1 - assumptions.debt_ratio)
-    debt = total_capex * assumptions.debt_ratio
-    loan_schedule = amortization_schedule(
-        debt, assumptions.debt_interest_rate, assumptions.debt_term_years
-    )
+    if debt_facilities:
+        detailed_loan_rows: List[Dict[str, float]] = []
+        for facility in debt_facilities:
+            principal = float(facility.get("Principal", 0.0) or 0.0)
+            if principal <= 0:
+                continue
+            detailed_loan_rows.extend(
+                amortization_schedule(
+                    principal,
+                    float(facility.get("Interest rate", assumptions.debt_interest_rate) or 0.0),
+                    int(facility.get("Term (years)", assumptions.debt_term_years) or assumptions.debt_term_years),
+                    grace_years=int(facility.get("Grace period (years)", 0) or 0),
+                    start_year=int(facility.get("Start year", 1) or 1),
+                    repayment_type=str(facility.get("Repayment type", "annuity") or "annuity"),
+                    loan_name=str(facility.get("Loan name", "Loan") or "Loan"),
+                    facility_type=str(facility.get("Facility type", "Term loan") or "Term loan"),
+                )
+            )
+        projection_years = max(int(assumptions.production_horizon_years or 1), 1)
+        loan_schedule = _aggregate_loan_schedule(detailed_loan_rows, projection_years)
+        debt = sum(float(row.get("Principal", 0.0) or 0.0) for row in debt_facilities)
+        equity = total_capex - debt
+    else:
+        equity = total_capex * (1 - assumptions.debt_ratio)
+        debt = total_capex * assumptions.debt_ratio
+        loan_schedule = amortization_schedule(
+            debt, assumptions.debt_interest_rate, assumptions.debt_term_years
+        )
 
     rows: List[CashFlowRow] = []
     depreciation = base_annual.depreciation
@@ -266,15 +360,27 @@ def build_financial_statements(
     assumptions: Assumptions,
     cashflows: List[CashFlowRow],
     loan_schedule: List[Dict[str, float]],
+    *,
+    annual_depreciation: float | None = None,
+    opening_total_capex: float | None = None,
+    asset_book_summary: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, List[Any]]:
-    total_capex = assumptions.capex_housing + assumptions.capex_equipment
+    total_capex = (
+        float(opening_total_capex)
+        if opening_total_capex is not None
+        else assumptions.capex_housing + assumptions.capex_equipment
+    )
     depreciation = (
-        assumptions.capex_housing + assumptions.capex_equipment
-    ) / assumptions.depreciation_years
+        float(annual_depreciation)
+        if annual_depreciation is not None
+        else (assumptions.capex_housing + assumptions.capex_equipment)
+        / assumptions.depreciation_years
+    )
     initial_working_capital = (
         cashflows[0].ending_working_capital if cashflows else 0.0
     )
-    equity_base = total_capex * (1 - assumptions.debt_ratio)
+    initial_debt = cashflows[0].ending_debt if cashflows else (total_capex * assumptions.debt_ratio)
+    equity_base = total_capex - initial_debt
     equity_total = equity_base + initial_working_capital
 
     income_rows: List[IncomeStatementRow] = []
@@ -282,7 +388,7 @@ def build_financial_statements(
     balance_rows: List[BalanceSheetRow] = []
 
     investing_cash = -(total_capex + initial_working_capital)
-    financing_cash = equity_total + (total_capex * assumptions.debt_ratio)
+    financing_cash = equity_total + initial_debt
     net_change = investing_cash + financing_cash
     cash_balance = net_change
     start_year = int(assumptions.production_start_year) if assumptions.production_start_year else 0
@@ -310,11 +416,11 @@ def build_financial_statements(
                     total_assets=total_capex
                     + initial_working_capital
                     + cash_balance,
-                    debt=total_capex * assumptions.debt_ratio,
+                    debt=initial_debt,
                     equity=equity_total + cash_balance,
                     retained_earnings=0.0,
                     debt_to_equity=(
-                        (total_capex * assumptions.debt_ratio) / equity_total
+                        (initial_debt / equity_total)
                         if equity_total
                         else None
                     ),
@@ -361,8 +467,14 @@ def build_financial_statements(
             )
         )
 
-        accum_dep = min(row.year, assumptions.depreciation_years) * depreciation
-        net_ppe = max(0.0, total_capex - accum_dep)
+        summary_lookup = {
+            int(entry.get("Project year", 0)): entry for entry in (asset_book_summary or [])
+        }
+        if row.year in summary_lookup:
+            net_ppe = float(summary_lookup[row.year].get("Closing book value", 0.0))
+        else:
+            accum_dep = min(row.year, assumptions.depreciation_years) * depreciation
+            net_ppe = max(0.0, total_capex - accum_dep)
         debt_balance = row.ending_debt if row.ending_debt else 0.0
         total_assets = cash_balance + row.ending_working_capital + net_ppe
         equity = total_assets - debt_balance

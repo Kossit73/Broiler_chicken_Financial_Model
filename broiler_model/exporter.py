@@ -167,9 +167,19 @@ def _build_export_frames(
         assumptions.production_start_year,
     )
 
+    detail_outputs = results.get("detail_schedule_outputs", {})
+
     return {
         "Assumptions": _records_to_frame(results["assumptions_schedule"]),
         "Input Values": _records_to_frame(asdict(assumptions)),
+        "Equipment Capex Detail": _records_to_frame(detail_outputs.get("equipment_capex", [])),
+        "Housing Capex Detail": _records_to_frame(detail_outputs.get("housing_capex", [])),
+        "Labor Detail": _records_to_frame(detail_outputs.get("labor", [])),
+        "Maintenance Detail": _records_to_frame(detail_outputs.get("maintenance", [])),
+        "Management Fee Detail": _records_to_frame(detail_outputs.get("management_fee", [])),
+        "Debt Facilities": _records_to_frame(detail_outputs.get("debt_facilities", [])),
+        "Asset Book Schedule": _records_to_frame(detail_outputs.get("asset_book_schedule", [])),
+        "Asset Book Summary": _records_to_frame(detail_outputs.get("asset_book_summary", [])),
         "Production Cycles": _records_to_frame(results["cycles"]),
         "Annual Summary": _records_to_frame(results["annual"]),
         "Cash Flows": _records_to_frame(results["cashflows"]),

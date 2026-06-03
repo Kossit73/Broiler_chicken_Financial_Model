@@ -25,6 +25,15 @@ from streamlit.delta_generator import DeltaGenerator
 from streamlit.errors import StreamlitAPIException
 
 from broiler_model.assumptions import Assumptions, ASSUMPTION_SCHEDULE_LAYOUT
+from broiler_model.detail_schedules import (
+    build_default_detail_schedules,
+    normalise_detail_schedules,
+    prepare_detail_context,
+    recalculate_capex_schedule,
+    recalculate_cost_schedule,
+    recalculate_debt_facilities,
+    recalculate_labor_schedule,
+)
 from broiler_model.analytics import (
     AnalyticsPlan,
     break_even_analysis,
@@ -131,6 +140,14 @@ _PRODUCTION_ASSUMPTION_HELP = {
     "Live bird price per head": "Alternative selling price when birds are sold per head rather than per kg.",
     "By-product price per kg": "Selling price for feathers, offal, livers, and other by-product streams.",
     "Annual price growth": "Escalation applied by the model to selling prices over time. Enter in percent terms in the editor.",
+}
+_DETAIL_SCHEDULE_NAMES = {
+    "equipment_capex": "Equipment capex detail",
+    "housing_capex": "Housing capex detail",
+    "labor": "Labor per cycle detail",
+    "maintenance": "Maintenance per cycle detail",
+    "management_fee": "Management fee per cycle detail",
+    "debt_facilities": "Debt facilities",
 }
 try:
     _ASSUMPTION_FIELD_TYPES = get_type_hints(Assumptions)
@@ -2602,10 +2619,16 @@ def _ensure_scenario_payload(
         return existing["model"], existing["results"]
 
     assumptions_data = snapshot.get("assumptions", {})
+    detail_schedule_data = snapshot.get("detail_schedules", {})
     assumptions = Assumptions(**assumptions_data) if assumptions_data else Assumptions()
-    model = ScenarioModel(scenario=selected_scenario, assumptions=assumptions)
+    resolved_assumptions, _ = prepare_detail_context(
+        assumptions,
+        detail_schedule_data if isinstance(detail_schedule_data, dict) else None,
+    )
+    model = ScenarioModel(scenario=selected_scenario, assumptions=resolved_assumptions)
     results = generate_model_outputs(
         assumptions,
+        detail_schedules=detail_schedule_data if isinstance(detail_schedule_data, dict) else None,
         analytics_plan=AnalyticsPlan.summary(),
     )
     cache[selected_scenario] = {
@@ -2623,6 +2646,7 @@ def _normalize_scenario_payload(payload: Any) -> Dict[str, Any]:
     assumptions_payload = normalized.get("assumptions", {})
     ai_payload = normalized.get("ai_settings", {})
     benchmark_payload = normalized.get("investor_benchmarks", {})
+    detail_payload = normalized.get("detail_schedules", {})
 
     if not isinstance(assumptions_payload, dict):
         assumptions_payload = {}
@@ -2630,6 +2654,8 @@ def _normalize_scenario_payload(payload: Any) -> Dict[str, Any]:
         ai_payload = {}
     if not isinstance(benchmark_payload, dict):
         benchmark_payload = {}
+    if not isinstance(detail_payload, dict):
+        detail_payload = {}
 
     if "eggs_per_cycle_default" in assumptions_payload and "eggs_per_bird_per_cycle" not in assumptions_payload:
         assumptions_payload["eggs_per_bird_per_cycle"] = float(
@@ -2637,7 +2663,16 @@ def _normalize_scenario_payload(payload: Any) -> Dict[str, Any]:
         ) / max(float(assumptions_payload.get("birds_per_cycle", 1) or 1), 1.0)
     assumptions_payload.pop("eggs_per_cycle_default", None)
 
+    assumptions_obj = Assumptions(**assumptions_payload) if assumptions_payload else Assumptions()
+    if detail_payload:
+        assumptions_obj, prepared_detail = prepare_detail_context(
+            assumptions_obj,
+            detail_payload,
+        )
+        assumptions_payload = asdict(assumptions_obj)
+        detail_payload = prepared_detail["schedules"]
     normalized["assumptions"] = assumptions_payload
+    normalized["detail_schedules"] = detail_payload
     normalized["ai_settings"] = {
         **DEFAULT_AI_SETTINGS,
         **{k: v for k, v in ai_payload.items() if v is not None},
@@ -2709,6 +2744,27 @@ def _generate_csv_zip_bytes(
     export_frames: Dict[str, pd.DataFrame] = {
         "assumptions_schedule.csv": pd.DataFrame(results["assumptions_schedule"]),
         "input_values.csv": pd.DataFrame([asdict(model.assumptions)]),
+        "equipment_capex_detail.csv": pd.DataFrame(
+            results.get("detail_schedule_outputs", {}).get("equipment_capex", [])
+        ),
+        "housing_capex_detail.csv": pd.DataFrame(
+            results.get("detail_schedule_outputs", {}).get("housing_capex", [])
+        ),
+        "labor_detail.csv": pd.DataFrame(
+            results.get("detail_schedule_outputs", {}).get("labor", [])
+        ),
+        "maintenance_detail.csv": pd.DataFrame(
+            results.get("detail_schedule_outputs", {}).get("maintenance", [])
+        ),
+        "management_fee_detail.csv": pd.DataFrame(
+            results.get("detail_schedule_outputs", {}).get("management_fee", [])
+        ),
+        "debt_facilities.csv": pd.DataFrame(
+            results.get("detail_schedule_outputs", {}).get("debt_facilities", [])
+        ),
+        "asset_book_schedule.csv": pd.DataFrame(
+            results.get("detail_schedule_outputs", {}).get("asset_book_schedule", [])
+        ),
         "production_cycles.csv": pd.DataFrame([asdict(cycle) for cycle in results["cycles"]]),
         "annual_summary.csv": pd.DataFrame([asdict(results["annual"])]),
         "cash_flows.csv": pd.DataFrame([asdict(row) for row in results["cashflows"]]),
@@ -2987,6 +3043,7 @@ def _reset_scenario_edit_states(scenario: str) -> None:
 
     for namespace in (
         "assumption_schedule_state",
+        "detail_schedule_state",
         "revenue_schedule_state",
         "advanced_schedule_state",
         "custom_simulation_state",
@@ -3057,6 +3114,49 @@ def _assumptions_from_schedule(
         return None
 
     return Assumptions(**updated_values)
+
+
+def _recalculate_detail_schedule(key: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if key in {"equipment_capex", "housing_capex"}:
+        return recalculate_capex_schedule(rows)
+    if key == "labor":
+        return recalculate_labor_schedule(rows)
+    if key in {"maintenance", "management_fee"}:
+        return recalculate_cost_schedule(rows)
+    if key == "debt_facilities":
+        return recalculate_debt_facilities(rows)
+    return rows
+
+
+def _refresh_model_cache(
+    selected_scenario: str,
+    payload: Dict[str, Any],
+) -> Tuple[ScenarioModel, Dict[str, Any]]:
+    st.session_state.snapshot_scenario = selected_scenario
+    st.session_state.input_snapshot = copy.deepcopy(payload)
+    base_assumptions = Assumptions(**payload.get("assumptions", {}))
+    detail_schedules = payload.get("detail_schedules", {})
+    resolved_assumptions, _ = prepare_detail_context(
+        base_assumptions,
+        detail_schedules if isinstance(detail_schedules, dict) else None,
+    )
+    updated_model = ScenarioModel(
+        scenario=selected_scenario,
+        assumptions=resolved_assumptions,
+    )
+    updated_results = generate_model_outputs(
+        base_assumptions,
+        detail_schedules=detail_schedules if isinstance(detail_schedules, dict) else None,
+        analytics_plan=AnalyticsPlan.summary(),
+    )
+    scenario_payloads = st.session_state.setdefault("scenario_payloads", {})
+    scenario_payloads[selected_scenario] = {
+        "snapshot": copy.deepcopy(st.session_state.input_snapshot),
+        "model": updated_model,
+        "results": updated_results,
+    }
+    st.session_state.model_results = (updated_model, updated_results)
+    return updated_model, updated_results
 
 
 def _next_period_label(df: pd.DataFrame) -> str:
@@ -3479,6 +3579,7 @@ def _render_schedule_editor(
     allow_row_add_remove: bool = True,
     row_edit_only: bool = False,
     column_help: Optional[Dict[str, str]] = None,
+    disabled_columns: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
     """Render an editable schedule with add/remove and yearly increment controls.
 
@@ -3603,7 +3704,9 @@ def _render_schedule_editor(
         df,
         disabled=not edit_enabled,
         fixed=fixed_columns,
-        disabled_columns=original_columns if row_edit_only else None,
+        disabled_columns=(
+            original_columns if row_edit_only else disabled_columns
+        ),
         help_text=column_help,
     )
     instructions: List[str] = []
@@ -3734,6 +3837,120 @@ def _render_analytics_schedule(
         row_defaults=template,
         allow_yearly_increment=allow_yearly_increment,
     ).pipe(lambda edited: _parse_iterable_columns(edited, iterable_columns) if iterable_columns else edited)
+
+
+def _detail_schedule_editor_configs() -> List[Dict[str, Any]]:
+    return [
+        {
+            "key": "equipment_capex",
+            "title": "Equipment capex",
+            "description": "Editable asset-level equipment schedule. Totals and depreciation roll into the financial statements automatically.",
+            "columns_help": {
+                "Depreciation rate": "Enter as a decimal rate. Example: 0.10 = 10%.",
+                "Annual depreciation": "Calculated from gross amount and depreciation rate.",
+                "Closing book value": "Calculated closing value after one year of depreciation.",
+            },
+            "row_defaults": {
+                "Item": "New equipment item",
+                "Opening amount": 0.0,
+                "New additions": 0.0,
+                "Depreciation rate": 0.1,
+                "Annual depreciation": 0.0,
+                "Closing book value": 0.0,
+                "Notes": "",
+            },
+            "disabled_columns": ["Gross amount", "Annual depreciation", "Closing book value"],
+        },
+        {
+            "key": "housing_capex",
+            "title": "Housing capex",
+            "description": "Editable housing-asset schedule with depreciation and opening/closing book values.",
+            "columns_help": {
+                "Depreciation rate": "Enter as a decimal rate. Example: 0.08 = 8%.",
+                "Annual depreciation": "Calculated from gross amount and depreciation rate.",
+                "Closing book value": "Calculated closing value after one year of depreciation.",
+            },
+            "row_defaults": {
+                "Item": "New housing item",
+                "Opening amount": 0.0,
+                "New additions": 0.0,
+                "Depreciation rate": 0.1,
+                "Annual depreciation": 0.0,
+                "Closing book value": 0.0,
+                "Notes": "",
+            },
+            "disabled_columns": ["Gross amount", "Annual depreciation", "Closing book value"],
+        },
+        {
+            "key": "labor",
+            "title": "Labor per cycle",
+            "description": "Role-based labor schedule. Headcount and unit cost roll into total labor cost per cycle.",
+            "columns_help": {
+                "Amount per cycle": "Calculated as headcount × cost per head per cycle.",
+            },
+            "row_defaults": {
+                "Role": "New labor role",
+                "Headcount": 1,
+                "Cost per head per cycle": 0.0,
+                "Amount per cycle": 0.0,
+                "Notes": "",
+            },
+            "disabled_columns": ["Amount per cycle"],
+        },
+        {
+            "key": "maintenance",
+            "title": "Maintenance per cycle",
+            "description": "Detailed recurring maintenance items. Units × unit cost determine the total per cycle.",
+            "columns_help": {
+                "Amount per cycle": "Calculated as units × unit cost per cycle.",
+            },
+            "row_defaults": {
+                "Item": "New maintenance item",
+                "Units": 1.0,
+                "Unit cost per cycle": 0.0,
+                "Amount per cycle": 0.0,
+                "Notes": "",
+            },
+            "disabled_columns": ["Amount per cycle"],
+        },
+        {
+            "key": "management_fee",
+            "title": "Management fee per cycle",
+            "description": "Detailed management-fee lines that roll up to the per-cycle management charge.",
+            "columns_help": {
+                "Amount per cycle": "Calculated as units × unit cost per cycle.",
+            },
+            "row_defaults": {
+                "Item": "New management fee item",
+                "Units": 1.0,
+                "Unit cost per cycle": 0.0,
+                "Amount per cycle": 0.0,
+                "Notes": "",
+            },
+            "disabled_columns": ["Amount per cycle"],
+        },
+        {
+            "key": "debt_facilities",
+            "title": "Debt facilities",
+            "description": "Multi-loan debt schedule. Add separate facilities and choose different repayment types for each.",
+            "columns_help": {
+                "Interest rate": "Enter as a decimal rate. Example: 0.12 = 12%.",
+                "Repayment type": "Supported values: annuity, straight_line, interest_only, bullet.",
+            },
+            "row_defaults": {
+                "Loan name": "New facility",
+                "Facility type": "Term loan",
+                "Principal": 0.0,
+                "Interest rate": 0.1,
+                "Term (years)": 5,
+                "Grace period (years)": 0,
+                "Start year": 1,
+                "Repayment type": "annuity",
+                "Notes": "",
+            },
+            "disabled_columns": [],
+        },
+    ]
 
 
 def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = None) -> None:
@@ -4326,6 +4543,11 @@ def main() -> None:
 
     valuation = results["valuation"]
     assumption_schedule_df = pd.DataFrame(results["assumptions_schedule"])
+    detail_schedule_outputs = results.get("detail_schedule_outputs", {})
+    detail_schedule_defaults = results.get("detail_schedules") or normalise_detail_schedules(
+        model.assumptions,
+        payload.get("detail_schedules", {}),
+    )
     revenue_schedules = results["revenue_schedules"]
     revenue_summary = results.get(
         "revenue_summary",
@@ -4354,6 +4576,10 @@ def main() -> None:
     balance_df = pd.DataFrame([asdict(row) for row in financials["balance_sheet"]])
     cash_statement_df = pd.DataFrame([asdict(row) for row in financials["cash_flow_statement"]])
     loan_df = pd.DataFrame(financials["loan_schedule"])
+    asset_book_df = pd.DataFrame(detail_schedule_outputs.get("asset_book_schedule", []))
+    asset_book_summary_df = pd.DataFrame(
+        detail_schedule_outputs.get("asset_book_summary", [])
+    )
     asset_schedule_df = (
         balance_df[
             ["year", "cash", "working_capital", "net_ppe", "total_assets"]
@@ -4555,31 +4781,80 @@ def main() -> None:
                         }
                     )
                     st.session_state.governance_log = governance_store
-                st.session_state.snapshot_scenario = selected_scenario
-                st.session_state.input_snapshot = copy.deepcopy(payload)
-
-                updated_model = ScenarioModel(
-                    scenario=selected_scenario, assumptions=new_assumptions
+                updated_model, updated_results = _refresh_model_cache(
+                    selected_scenario,
+                    payload,
                 )
-                updated_results = generate_model_outputs(
-                    new_assumptions,
-                    analytics_plan=AnalyticsPlan.summary(),
-                )
-
-                scenario_payloads = st.session_state.setdefault(
-                    "scenario_payloads", {}
-                )
-                scenario_payloads[selected_scenario] = {
-                    "snapshot": copy.deepcopy(st.session_state.input_snapshot),
-                    "model": updated_model,
-                    "results": updated_results,
-                }
                 results = updated_results
                 st.session_state.model_results = (updated_model, updated_results)
                 st.success(
                     "Assumption schedule edits applied. Recalculating model outputs..."
                 )
                 _rerun()
+
+        st.subheader("Detailed schedules")
+        st.caption(
+            "These editable schedules become the authoritative source for capex, selected operating costs, and debt. "
+            "Once edited, their rolled-up totals flow back into the summary assumptions and financial statements."
+        )
+        current_detail_schedules = normalise_detail_schedules(
+            Assumptions(**payload.get("assumptions", {})),
+            payload.get("detail_schedules", {}),
+        )
+        updated_detail_schedules: Dict[str, List[Dict[str, Any]]] = {}
+        for config in _detail_schedule_editor_configs():
+            st.markdown(f"##### {config['title']}")
+            st.caption(config["description"])
+            schedule_key = config["key"]
+            defaults = copy.deepcopy(
+                detail_schedule_defaults.get(schedule_key)
+                or build_default_detail_schedules(model.assumptions).get(schedule_key, [])
+            )
+            edited_df = _render_schedule_editor(
+                config["title"],
+                schedule_key,
+                defaults,
+                selected_scenario,
+                namespace="detail_schedule_state",
+                row_defaults=copy.deepcopy(config.get("row_defaults", {})),
+                allow_yearly_increment=False,
+                auto_update_revenue=False,
+                column_help=config.get("columns_help"),
+                disabled_columns=config.get("disabled_columns"),
+            )
+            updated_detail_schedules[schedule_key] = _recalculate_detail_schedule(
+                schedule_key,
+                edited_df.replace({pd.NA: None}).to_dict("records"),
+            )
+
+        if updated_detail_schedules and updated_detail_schedules != current_detail_schedules:
+            payload["detail_schedules"] = copy.deepcopy(updated_detail_schedules)
+            base_assumptions = Assumptions(**payload.get("assumptions", {}))
+            resolved_assumptions, _ = prepare_detail_context(
+                base_assumptions,
+                updated_detail_schedules,
+            )
+            payload["assumptions"] = asdict(resolved_assumptions)
+            scenario_store[selected_scenario]["detail_schedules"] = copy.deepcopy(
+                updated_detail_schedules
+            )
+            scenario_store[selected_scenario]["assumptions"] = copy.deepcopy(
+                payload["assumptions"]
+            )
+            governance_store = st.session_state.setdefault("governance_log", {})
+            scenario_log = governance_store.setdefault(selected_scenario, [])
+            scenario_log.append(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "event": "Detailed schedules updated",
+                }
+            )
+            st.session_state.governance_log = governance_store
+            _refresh_model_cache(selected_scenario, payload)
+            st.success(
+                "Detailed schedules applied. Recalculating capex, operating costs, and debt structure..."
+            )
+            _rerun()
 
         st.subheader("Revenue schedules")
         updated_revenue: Dict[str, List[Dict[str, Any]]] = {}
@@ -4659,8 +4934,25 @@ def main() -> None:
         st.subheader("Debt schedule")
         st.dataframe(loan_df, use_container_width=True, hide_index=True)
 
+        debt_facilities_df = pd.DataFrame(
+            detail_schedule_outputs.get("debt_facilities", [])
+        )
+        if not debt_facilities_df.empty:
+            st.subheader("Debt facilities")
+            st.dataframe(debt_facilities_df, use_container_width=True, hide_index=True)
+
         st.subheader("Asset schedule")
         st.dataframe(asset_schedule_df, use_container_width=True, hide_index=True)
+        if not asset_book_summary_df.empty:
+            st.subheader("Detailed asset book summary")
+            st.dataframe(
+                asset_book_summary_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+        if not asset_book_df.empty:
+            st.subheader("Detailed asset book by item")
+            st.dataframe(asset_book_df, use_container_width=True, hide_index=True)
 
     with financials_tab:
         fin_tab1, fin_tab2, fin_tab3, fin_tab4 = st.tabs(

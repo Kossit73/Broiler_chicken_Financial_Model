@@ -35,6 +35,101 @@ class GenerateModelOutputsTests(unittest.TestCase):
         self.assertTrue(math.isfinite(valuation["npv"]))
         self.assertGreater(len(results["cashflows"]), 0)
         self.assertIn("advanced_analytics", results)
+        self.assertIn("detail_schedule_outputs", results)
+
+    def test_detailed_schedules_roll_up_into_model_assumptions(self) -> None:
+        assumptions = Assumptions()
+        detail_schedules = {
+            "equipment_capex": [
+                {
+                    "Item": "Feed lines",
+                    "Opening amount": 120000.0,
+                    "New additions": 30000.0,
+                    "Depreciation rate": 0.10,
+                }
+            ],
+            "housing_capex": [
+                {
+                    "Item": "Broiler house A",
+                    "Opening amount": 400000.0,
+                    "New additions": 50000.0,
+                    "Depreciation rate": 0.05,
+                }
+            ],
+            "labor": [
+                {
+                    "Role": "Supervisors",
+                    "Headcount": 2,
+                    "Cost per head per cycle": 1800.0,
+                },
+                {
+                    "Role": "Handlers",
+                    "Headcount": 4,
+                    "Cost per head per cycle": 950.0,
+                },
+            ],
+            "maintenance": [
+                {
+                    "Item": "Preventive maintenance",
+                    "Units": 1,
+                    "Unit cost per cycle": 1750.0,
+                }
+            ],
+            "management_fee": [
+                {
+                    "Item": "Farm manager",
+                    "Units": 1,
+                    "Unit cost per cycle": 2200.0,
+                }
+            ],
+        }
+
+        results = generate_model_outputs(assumptions, detail_schedules=detail_schedules)
+        resolved = results["assumptions"]
+
+        self.assertAlmostEqual(resolved.capex_equipment, 150000.0)
+        self.assertAlmostEqual(resolved.capex_housing, 450000.0)
+        self.assertAlmostEqual(resolved.labor_per_cycle, 7400.0)
+        self.assertAlmostEqual(resolved.maintenance_per_cycle, 1750.0)
+        self.assertAlmostEqual(resolved.management_fee_per_cycle, 2200.0)
+        self.assertAlmostEqual(results["annual"].depreciation, 37500.0)
+
+    def test_multi_loan_debt_schedule_supports_multiple_facilities(self) -> None:
+        assumptions = Assumptions(capex_housing=500000.0, capex_equipment=250000.0)
+        detail_schedules = {
+            "debt_facilities": [
+                {
+                    "Loan name": "Senior term loan",
+                    "Facility type": "Bank debt",
+                    "Principal": 300000.0,
+                    "Interest rate": 0.08,
+                    "Term (years)": 5,
+                    "Grace period (years)": 0,
+                    "Start year": 1,
+                    "Repayment type": "annuity",
+                },
+                {
+                    "Loan name": "Equipment finance",
+                    "Facility type": "Lease",
+                    "Principal": 100000.0,
+                    "Interest rate": 0.10,
+                    "Term (years)": 4,
+                    "Grace period (years)": 1,
+                    "Start year": 2,
+                    "Repayment type": "straight_line",
+                },
+            ]
+        }
+
+        results = generate_model_outputs(assumptions, detail_schedules=detail_schedules)
+        resolved = results["assumptions"]
+        debt_schedule = results["financial_statements"]["loan_schedule"]
+
+        self.assertAlmostEqual(resolved.debt_ratio, 400000.0 / 750000.0, places=6)
+        self.assertTrue(debt_schedule)
+        self.assertGreaterEqual(len(debt_schedule), 4)
+        self.assertGreater(debt_schedule[0]["payment"], 0.0)
+        self.assertIn("calendar_year", debt_schedule[0])
 
 
 class AdvancedAnalyticsTests(unittest.TestCase):
@@ -165,6 +260,8 @@ class WorkbookExportTests(unittest.TestCase):
         self.assertIn("Overview", workbook.sheetnames)
         self.assertIn("Revenue Dashboard", workbook.sheetnames)
         self.assertIn("Assumptions", workbook.sheetnames)
+        self.assertIn("Equipment Capex Detail", workbook.sheetnames)
+        self.assertIn("Debt Facilities", workbook.sheetnames)
         self.assertIn("Production Cycles", workbook.sheetnames)
         self.assertEqual(workbook["Overview"]["B2"].value, "Broiler Chicken Financial Model  |  Baseline")
         self.assertEqual(workbook["Revenue Dashboard"]["B2"].value, "Revenue Mix Dashboard")

@@ -94,6 +94,44 @@ ROW_EDIT_COLUMN = "Edit row"
 _ASSUMPTION_LABEL_TO_KEY = {
     label: key for _, label, key in ASSUMPTION_SCHEDULE_LAYOUT
 }
+_ASSUMPTION_INTEGER_LABELS = {
+    "Cycles per year",
+    "Production start year",
+    "Production horizon (years)",
+    "Production end year",
+    "Birds placed per cycle",
+    "Debt term (years)",
+    "Depreciation years",
+    "AR days",
+    "Inventory days",
+    "AP days",
+}
+_ASSUMPTION_PERCENTAGE_LABELS = {
+    "Mortality rate",
+    "Annual price growth",
+    "Debt ratio",
+    "Debt interest rate",
+    "Discount rate",
+    "Cost inflation",
+    "Tax rate",
+}
+_PRODUCTION_ASSUMPTION_HELP = {
+    "Farm name": "Name used across the model outputs and exported workbook tabs.",
+    "Cycles per year": "Number of broiler production cycles completed in a full operating year.",
+    "Production start year": "First calendar year in which the farm begins commercial production.",
+    "Production horizon (years)": "Number of modeled operating years included in the forecast horizon.",
+    "Birds placed per cycle": "Starting flock size loaded into the farm at the beginning of each cycle.",
+    "Mortality rate": "Expected share of birds lost during a cycle. Enter in percent terms in the editor.",
+    "Final weight (kg)": "Average live weight achieved per surviving bird at sale.",
+    "Feed conversion ratio": "Kilograms of feed required to produce one kilogram of live bird weight.",
+    "Live price per kg": "Base selling price received per kilogram of live broiler output.",
+    "Eggs price per dozen": "Selling price per dozen for any egg output included in the business case.",
+    "Eggs per bird per cycle": "Average egg yield attributed to each bird during a production cycle.",
+    "Manure price per ton": "Selling price captured for poultry manure or litter output.",
+    "Live bird price per head": "Alternative selling price when birds are sold per head rather than per kg.",
+    "By-product price per kg": "Selling price for feathers, offal, livers, and other by-product streams.",
+    "Annual price growth": "Escalation applied by the model to selling prices over time. Enter in percent terms in the editor.",
+}
 try:
     _ASSUMPTION_FIELD_TYPES = get_type_hints(Assumptions)
 except Exception:  # pragma: no cover - defensive fallback
@@ -3184,6 +3222,72 @@ def _coerce_editor_input(value: str) -> Any:
         return text
 
 
+def _is_assumption_summary_frame(df: pd.DataFrame) -> bool:
+    return {"item", "value"}.issubset(df.columns)
+
+
+def _assumption_field_label(item: Any) -> str:
+    if item is None:
+        return ""
+    if isinstance(item, float) and math.isnan(item):
+        return ""
+    return str(item).strip()
+
+
+def _render_assumption_value_widget(item_label: str, current_value: Any) -> Any:
+    help_text = _PRODUCTION_ASSUMPTION_HELP.get(item_label)
+    key = _ASSUMPTION_LABEL_TO_KEY.get(item_label)
+    target_type = _ASSUMPTION_FIELD_TYPES.get(key, type(current_value))
+    numeric_value = _to_float(current_value)
+
+    if item_label in _ASSUMPTION_INTEGER_LABELS:
+        default_value = int(round(numeric_value or 0.0))
+        return st.number_input(
+            "Value",
+            value=default_value,
+            step=1,
+            format="%d",
+            help=help_text,
+        )
+
+    if item_label in _ASSUMPTION_PERCENTAGE_LABELS:
+        default_value = float((numeric_value or 0.0) * 100.0)
+        return st.number_input(
+            "Value (%)",
+            value=default_value,
+            step=0.1,
+            format="%.2f",
+            help=help_text,
+        )
+
+    if target_type is float:
+        default_value = float(numeric_value or 0.0)
+        return st.number_input(
+            "Value",
+            value=default_value,
+            step=0.01,
+            format="%.4f",
+            help=help_text,
+        )
+
+    default_text = "" if pd.isna(current_value) else str(current_value)
+    return st.text_input("Value", value=default_text, help=help_text)
+
+
+def _normalise_assumption_editor_value(item_label: str, raw_value: Any) -> Any:
+    if item_label in _ASSUMPTION_PERCENTAGE_LABELS:
+        try:
+            return float(raw_value) / 100.0
+        except (TypeError, ValueError):
+            return raw_value
+    if item_label in _ASSUMPTION_INTEGER_LABELS:
+        try:
+            return int(round(float(raw_value)))
+        except (TypeError, ValueError):
+            return raw_value
+    return raw_value
+
+
 def _render_row_edit_form(
     df: pd.DataFrame,
     idx: int,
@@ -3199,15 +3303,26 @@ def _render_row_edit_form(
         if column not in {ROW_REMOVAL_COLUMN, ROW_EDIT_COLUMN}
         and column not in fixed_columns
     ]
+    assumption_item = ""
+    if _is_assumption_summary_frame(df):
+        assumption_item = _assumption_field_label(df.at[idx, "item"])
+        editable_columns = [column for column in editable_columns if column == "value"]
     if not editable_columns:
         return df, False
 
     form_key = f"edit_row_form_{namespace}_{schedule_key}_{scenario}_{idx}"
     with st.form(form_key):
         st.markdown(f"**Editing row {idx + 1}**")
-        inputs: Dict[str, str] = {}
+        if assumption_item:
+            st.caption(f"Assumption: {assumption_item}")
+        inputs: Dict[str, Any] = {}
         for column in editable_columns:
             current_value = df.at[idx, column]
+            if assumption_item and column == "value":
+                inputs[column] = _render_assumption_value_widget(
+                    assumption_item, current_value
+                )
+                continue
             default_text = "" if pd.isna(current_value) else str(current_value)
             inputs[column] = st.text_input(column, value=default_text)
         submitted = st.form_submit_button("Save row")
@@ -3220,7 +3335,12 @@ def _render_row_edit_form(
         series = new_df[column]
         if pd.api.types.is_string_dtype(series):
             new_df[column] = series.astype(object)
-        new_df.at[idx, column] = _coerce_editor_input(raw_value)
+        if assumption_item and column == "value":
+            new_df.at[idx, column] = _normalise_assumption_editor_value(
+                assumption_item, raw_value
+            )
+        else:
+            new_df.at[idx, column] = _coerce_editor_input(raw_value)
     st.success(f"Row {idx + 1} updated.")
     return new_df, True
 
@@ -3244,22 +3364,44 @@ def _chunked(iterable: Iterable[Any], size: int) -> Iterable[List[Any]]:
         yield chunk
 
 
-def _build_column_config(df: pd.DataFrame, *, disabled: bool, fixed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _build_column_config(
+    df: pd.DataFrame,
+    *,
+    disabled: bool,
+    fixed: Optional[Dict[str, Any]] = None,
+    disabled_columns: Optional[Iterable[str]] = None,
+    help_text: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     """Create Streamlit column configuration based on series dtypes."""
 
     fixed = fixed or {}
+    disabled_columns = set(disabled_columns or [])
+    help_text = help_text or {}
     config: Dict[str, Any] = {}
     for column in df.columns:
-        col_disabled = disabled or column in fixed
+        col_disabled = disabled or column in fixed or column in disabled_columns
+        column_help = help_text.get(column)
         series = df[column]
         if pd.api.types.is_bool_dtype(series):
-            config[column] = st.column_config.CheckboxColumn(disabled=col_disabled)
+            config[column] = st.column_config.CheckboxColumn(
+                disabled=col_disabled,
+                help=column_help,
+            )
         elif pd.api.types.is_numeric_dtype(series):
-            config[column] = st.column_config.NumberColumn(disabled=col_disabled)
+            config[column] = st.column_config.NumberColumn(
+                disabled=col_disabled,
+                help=column_help,
+            )
         elif pd.api.types.is_datetime64_any_dtype(series):
-            config[column] = st.column_config.DatetimeColumn(disabled=col_disabled)
+            config[column] = st.column_config.DatetimeColumn(
+                disabled=col_disabled,
+                help=column_help,
+            )
         else:
-            config[column] = st.column_config.TextColumn(disabled=col_disabled)
+            config[column] = st.column_config.TextColumn(
+                disabled=col_disabled,
+                help=column_help,
+            )
     return config
 
 
@@ -3334,6 +3476,9 @@ def _render_schedule_editor(
     row_defaults: Optional[Dict[str, Any]] = None,
     allow_yearly_increment: bool = True,
     auto_update_revenue: bool = False,
+    allow_row_add_remove: bool = True,
+    row_edit_only: bool = False,
+    column_help: Optional[Dict[str, str]] = None,
 ) -> pd.DataFrame:
     """Render an editable schedule with add/remove and yearly increment controls.
 
@@ -3380,24 +3525,31 @@ def _render_schedule_editor(
 
     operation_applied = False
     if edit_enabled:
-        if ROW_REMOVAL_COLUMN not in df.columns:
+        if allow_row_add_remove and ROW_REMOVAL_COLUMN not in df.columns:
             df[ROW_REMOVAL_COLUMN] = False
+        if not allow_row_add_remove and ROW_REMOVAL_COLUMN in df.columns:
+            df = df.drop(columns=[ROW_REMOVAL_COLUMN])
         if ROW_EDIT_COLUMN not in df.columns:
             df[ROW_EDIT_COLUMN] = False
-        controls = st.columns(2)
-        if controls[0].button(
-            "Add row",
-            key=f"add_{namespace}_{schedule_key}_{scenario}",
-        ):
-            df = _add_schedule_row(df, row_defaults=row_defaults, fixed_columns=fixed_columns)
-            operation_applied = True
-        if controls[1].button(
-            "Remove row",
-            key=f"remove_{namespace}_{schedule_key}_{scenario}",
-        ):
-            if not df.empty:
-                df = df.iloc[:-1].reset_index(drop=True)
+        if allow_row_add_remove:
+            controls = st.columns(2)
+            if controls[0].button(
+                "Add row",
+                key=f"add_{namespace}_{schedule_key}_{scenario}",
+            ):
+                df = _add_schedule_row(
+                    df, row_defaults=row_defaults, fixed_columns=fixed_columns
+                )
                 operation_applied = True
+            if controls[1].button(
+                "Remove row",
+                key=f"remove_{namespace}_{schedule_key}_{scenario}",
+            ):
+                if not df.empty:
+                    df = df.iloc[:-1].reset_index(drop=True)
+                    operation_applied = True
+        elif edit_enabled:
+            st.caption("Use the row editor to update fixed assumption items safely.")
 
         df = _ensure_fixed_columns(df, fixed_columns)
 
@@ -3451,6 +3603,8 @@ def _render_schedule_editor(
         df,
         disabled=not edit_enabled,
         fixed=fixed_columns,
+        disabled_columns=original_columns if row_edit_only else None,
+        help_text=column_help,
     )
     instructions: List[str] = []
     if edit_enabled and ROW_EDIT_COLUMN in df.columns:
@@ -3473,7 +3627,7 @@ def _render_schedule_editor(
     try:
         edited_df = st.data_editor(
             df,
-            num_rows="dynamic",
+            num_rows="dynamic" if allow_row_add_remove else "fixed",
             use_container_width=True,
             hide_index=True,
             column_config=column_config,
@@ -3500,7 +3654,7 @@ def _render_schedule_editor(
         )
         edited_df = st.data_editor(
             fallback_df,
-            num_rows="dynamic",
+            num_rows="dynamic" if allow_row_add_remove else "fixed",
             use_container_width=True,
             hide_index=True,
             disabled=not edit_enabled,
@@ -4352,6 +4506,12 @@ def main() -> None:
                 st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
         st.subheader("Assumptions summary")
+        st.caption(
+            "Yearly increment is disabled for assumption summary groups because these rows "
+            "are scalar inputs, not year-by-year schedules. Use the row editor here: rate "
+            "fields open in percentage terms, structural fields save as whole numbers, and "
+            "the revenue tables keep the schedule increment controls where compounding is meaningful."
+        )
         updated_assumptions: List[Dict[str, Any]] = []
         for schedule_name, group in assumption_schedule_df.groupby("schedule", sort=False):
             schedule_key = _sanitize_key(schedule_name)
@@ -4362,7 +4522,13 @@ def main() -> None:
                 defaults,
                 selected_scenario,
                 namespace="assumption_schedule_state",
-                allow_yearly_increment=True,
+                allow_yearly_increment=False,
+                allow_row_add_remove=False,
+                row_edit_only=True,
+                column_help={
+                    "item": "Use the row editor to open item-specific guidance and editing controls.",
+                    "value": "Rates are edited as percentages in the row editor, while structural fields are saved as whole numbers.",
+                },
             )
             for record in edited_df.replace({pd.NA: None}).to_dict("records"):
                 merged = {"schedule": schedule_name}

@@ -532,6 +532,412 @@ def _format_ratio(value: Any, digits: int = 2) -> str:
     return f"{numeric:.{digits}f}x"
 
 
+def _format_percent(value: Any, digits: int = 2) -> str:
+    """Return a fixed precision percentage string for display."""
+
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "N/A"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"{numeric:.{digits}%}"
+
+
+def _first_present_column(
+    df: pd.DataFrame, candidates: Iterable[str]
+) -> Optional[str]:
+    """Return the first candidate column that exists in the dataframe."""
+
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+    return None
+
+
+def _build_display_frame(
+    df: pd.DataFrame,
+    columns: Iterable[Tuple[str, Iterable[str] | str]],
+) -> pd.DataFrame:
+    """Create a reader-friendly dataframe from the first available source columns."""
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+
+    output: Dict[str, Any] = {}
+    for label, candidates in columns:
+        candidate_list = (
+            list(candidates)
+            if isinstance(candidates, (list, tuple))
+            else [candidates]
+        )
+        source_column = _first_present_column(df, candidate_list)
+        if source_column is not None:
+            output[label] = df[source_column].tolist()
+
+    return pd.DataFrame(output)
+
+
+def _format_table_value(column: str, value: Any) -> str:
+    """Format dataframe values for markdown export."""
+
+    if value is None or pd.isna(value):
+        return ""
+
+    numeric = _to_float(value)
+    if numeric is None:
+        return str(value)
+
+    label = str(column).strip().lower()
+    if label in {"year", "period", "cycle", "project year", "loan year"}:
+        return str(int(round(numeric)))
+
+    percentage_tokens = (
+        "margin",
+        "irr",
+        "growth",
+        "mortality",
+        "return on",
+        "return_on",
+        "probability",
+        "rate",
+    )
+    if any(token in label for token in percentage_tokens) and abs(numeric) <= 10:
+        return f"{numeric:.2%}"
+
+    ratio_tokens = (
+        "ratio",
+        "dscr",
+        "coverage",
+        "payback",
+        "velocity",
+        "multiple",
+        "debt to equity",
+        "debt_to_equity",
+    )
+    if any(token in label for token in ratio_tokens):
+        return f"{numeric:,.2f}"
+
+    price_tokens = ("price", "per kg", "unit price")
+    if any(token in label for token in price_tokens):
+        return f"${numeric:,.2f}"
+
+    currency_tokens = (
+        "revenue",
+        "cost",
+        "ebitda",
+        "ebit",
+        "income",
+        "cash",
+        "debt",
+        "equity",
+        "assets",
+        "capex",
+        "profit",
+        "expense",
+        "tax",
+        "value",
+        "investment",
+        "working capital",
+        "earnings",
+        "ppe",
+    )
+    if any(token in label for token in currency_tokens):
+        return f"${numeric:,.0f}"
+
+    if float(numeric).is_integer():
+        return f"{numeric:,.0f}"
+    return f"{numeric:,.2f}"
+
+
+def _to_markdown_table(df: pd.DataFrame | None, rows: int = 20) -> str:
+    """Render a dataframe as markdown with a plain-text fallback."""
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return "_No data available._"
+
+    view = df.head(rows).copy()
+    for column in view.columns:
+        view[column] = view[column].map(lambda value: _format_table_value(column, value))
+
+    try:
+        return view.to_markdown(index=False)
+    except ImportError:
+        return "```\n" + view.to_string(index=False) + "\n```"
+
+
+def _last_numeric_value(df: pd.DataFrame, candidates: Iterable[str]) -> float:
+    """Return the last numeric value from the first available candidate column."""
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return float("nan")
+
+    source_column = _first_present_column(df, candidates)
+    if source_column is None:
+        return float("nan")
+
+    series = pd.to_numeric(df[source_column], errors="coerce").dropna()
+    return float(series.iloc[-1]) if not series.empty else float("nan")
+
+
+def _mean_numeric_value(df: pd.DataFrame, candidates: Iterable[str]) -> float:
+    """Return the mean numeric value from the first available candidate column."""
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return float("nan")
+
+    source_column = _first_present_column(df, candidates)
+    if source_column is None:
+        return float("nan")
+
+    series = pd.to_numeric(df[source_column], errors="coerce").dropna()
+    return float(series.mean()) if not series.empty else float("nan")
+
+
+def _financial_section_detailed_writeup(
+    assumptions: Assumptions,
+    income_df: pd.DataFrame,
+    cash_statement_df: pd.DataFrame,
+    balance_df: pd.DataFrame,
+    cycles_df: pd.DataFrame,
+    revenue_annual_df: pd.DataFrame,
+    break_even_df: pd.DataFrame,
+    forecast_df: pd.DataFrame,
+    time_series_df: pd.DataFrame,
+    trend_df: pd.DataFrame,
+    cashflow_df: pd.DataFrame,
+    dscr_df: pd.DataFrame,
+    coverage_df: pd.DataFrame,
+    leverage_df: pd.DataFrame,
+    risk_df: pd.DataFrame,
+) -> Dict[str, str]:
+    """Build expanded narrative tables for business-plan sections 4, 5, and 6."""
+
+    def _narrative_table(rows: List[Dict[str, object]]) -> str:
+        if not rows:
+            return "_No expanded interpretation available._"
+        return _to_markdown_table(pd.DataFrame(rows), rows=200)
+
+    revenue_last = _last_numeric_value(income_df, ["revenue"])
+    ebitda_last = _last_numeric_value(income_df, ["ebitda"])
+    net_income_last = _last_numeric_value(income_df, ["net_income"])
+    ebitda_margin_avg = _mean_numeric_value(income_df, ["ebitda_margin"])
+
+    operating_cash_last = _last_numeric_value(
+        cash_statement_df, ["operating_cash_flow"]
+    )
+    financing_cash_last = _last_numeric_value(
+        cash_statement_df, ["financing_cash_flow"]
+    )
+    ending_cash_last = _last_numeric_value(cash_statement_df, ["ending_cash"])
+    free_cash_flow_last = _last_numeric_value(cashflow_df, ["free_cash_flow"])
+
+    total_assets_last = _last_numeric_value(balance_df, ["total_assets"])
+    debt_last = _last_numeric_value(balance_df, ["debt"])
+    equity_last = _last_numeric_value(balance_df, ["equity"])
+    debt_to_equity_last = _last_numeric_value(balance_df, ["debt_to_equity"])
+
+    revenue_terminal = _last_numeric_value(revenue_annual_df, ["Revenue"])
+    break_even_price_avg = _mean_numeric_value(
+        break_even_df, ["Break-even price", "break_even_price_per_kg"]
+    )
+    avg_dscr = _mean_numeric_value(dscr_df, ["dscr"])
+    automated_forecast_last = _last_numeric_value(forecast_df, ["Revenue forecast"])
+    ar1_forecast_last = _last_numeric_value(time_series_df, ["Revenue forecast"])
+    anomaly_count = int(len(risk_df.index)) if isinstance(risk_df, pd.DataFrame) else 0
+    interest_coverage_avg = _mean_numeric_value(coverage_df, ["interest_coverage"])
+    debt_ratio_last = _last_numeric_value(leverage_df, ["debt_ratio"])
+
+    return {
+        "income": _narrative_table(
+            [
+                {
+                    "#": 0,
+                    "Key metric name": "Revenue",
+                    "Value": _format_currency(revenue_last),
+                    "Narrative": "Revenue shows the current modeled scale of broiler production and pricing realization. [Source ID: TABLE::Income Statement::Revenue]",
+                },
+                {
+                    "#": 1,
+                    "Key metric name": "EBITDA",
+                    "Value": _format_currency(ebitda_last),
+                    "Narrative": "EBITDA measures operating earnings before depreciation and financing, highlighting farm-level cash earning power. [Source ID: TABLE::Income Statement::EBITDA]",
+                },
+                {
+                    "#": 2,
+                    "Key metric name": "Net Income",
+                    "Value": _format_currency(net_income_last),
+                    "Narrative": "Net income reflects post-interest and post-tax profitability available to equity after financing structure effects. [Source ID: TABLE::Income Statement::Net Income]",
+                },
+                {
+                    "#": 3,
+                    "Key metric name": "Average EBITDA Margin",
+                    "Value": _format_percent(ebitda_margin_avg),
+                    "Narrative": "Average EBITDA margin shows how efficiently revenue converts into operating profit across the modeled horizon. [Source ID: TABLE::Income Statement::EBITDA Margin]",
+                },
+            ]
+        ),
+        "cash": _narrative_table(
+            [
+                {
+                    "#": 0,
+                    "Key metric name": "Operating Cash Flow",
+                    "Value": _format_currency(operating_cash_last),
+                    "Narrative": "Operating cash flow tracks the core cash generated by farm operations before investing and financing movements. [Source ID: TABLE::Cash Flow Statement::Operating Cash Flow]",
+                },
+                {
+                    "#": 1,
+                    "Key metric name": "Free Cash Flow",
+                    "Value": _format_currency(free_cash_flow_last),
+                    "Narrative": "Free cash flow shows the residual cash available after maintenance capex and debt-service requirements. [Source ID: TABLE::Cash Flows::Free Cash Flow]",
+                },
+                {
+                    "#": 2,
+                    "Key metric name": "Financing Cash Flow",
+                    "Value": _format_currency(financing_cash_last),
+                    "Narrative": "Financing cash flow indicates whether the project is still dependent on debt support or is self-funding after ramp-up. [Source ID: TABLE::Cash Flow Statement::Financing Cash Flow]",
+                },
+                {
+                    "#": 3,
+                    "Key metric name": "Ending Cash",
+                    "Value": _format_currency(ending_cash_last),
+                    "Narrative": "Ending cash is the period-close liquidity buffer used to judge resilience against operating volatility and covenant pressure. [Source ID: TABLE::Cash Flow Statement::Ending Cash]",
+                },
+            ]
+        ),
+        "balance": _narrative_table(
+            [
+                {
+                    "#": 0,
+                    "Key metric name": "Total Assets",
+                    "Value": _format_currency(total_assets_last),
+                    "Narrative": "Total assets capture the carrying value of the farm platform after cash accumulation and asset depreciation. [Source ID: TABLE::Balance Sheet::Total Assets]",
+                },
+                {
+                    "#": 1,
+                    "Key metric name": "Debt",
+                    "Value": _format_currency(debt_last),
+                    "Narrative": "Debt shows the remaining financed obligation after scheduled principal paydown. [Source ID: TABLE::Balance Sheet::Debt]",
+                },
+                {
+                    "#": 2,
+                    "Key metric name": "Equity",
+                    "Value": _format_currency(equity_last),
+                    "Narrative": "Equity tracks residual sponsor value after liabilities and retained earnings movements. [Source ID: TABLE::Balance Sheet::Equity]",
+                },
+                {
+                    "#": 3,
+                    "Key metric name": "Debt to Equity",
+                    "Value": _format_ratio(debt_to_equity_last),
+                    "Narrative": "Debt-to-equity summarizes leverage intensity and is a shorthand indicator of balance-sheet risk appetite. [Source ID: TABLE::Balance Sheet::Debt to Equity]",
+                },
+            ]
+        ),
+        "schedules": _narrative_table(
+            [
+                {
+                    "#": 0,
+                    "Key metric name": "Cycles per Year",
+                    "Value": assumptions.cycles_per_year,
+                    "Narrative": "Cycle cadence determines annual throughput and the speed at which the farm converts inputs into saleable birds. [Source ID: METRIC::Cycles per Year]",
+                },
+                {
+                    "#": 1,
+                    "Key metric name": "Birds per Cycle",
+                    "Value": assumptions.birds_per_cycle,
+                    "Narrative": "Bird placement per cycle is the core scale assumption behind production, feed demand, labor loading, and revenue generation. [Source ID: METRIC::Birds per Cycle]",
+                },
+                {
+                    "#": 2,
+                    "Key metric name": "Terminal-Year Revenue",
+                    "Value": _format_currency(revenue_terminal),
+                    "Narrative": "Terminal-year revenue indicates the scale of the mature operating case used in investor and lender discussions. [Source ID: TABLE::Revenue Annual Totals::Revenue]",
+                },
+                {
+                    "#": 3,
+                    "Key metric name": "Average Break-even Price",
+                    "Value": _format_currency(break_even_price_avg),
+                    "Narrative": "Average break-even price shows the selling-price floor required to recover direct and shared production costs. [Source ID: TABLE::Break Even::Break-even Price]",
+                },
+                {
+                    "#": 4,
+                    "Key metric name": "Average DSCR",
+                    "Value": _format_ratio(avg_dscr),
+                    "Narrative": "Average DSCR summarizes the credit headroom available across the repayment horizon. [Source ID: TABLE::DSCR::DSCR]",
+                },
+            ]
+        ),
+        "forecast": _narrative_table(
+            [
+                {
+                    "#": 0,
+                    "Key metric name": "Automated Revenue Forecast",
+                    "Value": _format_currency(automated_forecast_last),
+                    "Narrative": "The automated forecast extends the current revenue trajectory into the out-years for strategic planning. [Source ID: TABLE::Forecast::Revenue Forecast]",
+                },
+                {
+                    "#": 1,
+                    "Key metric name": "AR(1) Revenue Forecast",
+                    "Value": _format_currency(ar1_forecast_last),
+                    "Narrative": "The AR(1) forecast provides a second view of revenue persistence based on recent growth patterns. [Source ID: TABLE::Time Series::Revenue Forecast]",
+                },
+                {
+                    "#": 2,
+                    "Key metric name": "Forecast Horizon",
+                    "Value": max(len(forecast_df.index), len(time_series_df.index)),
+                    "Narrative": "The forecast horizon defines how far the model extends beyond the base projection for planning and fundraising use. [Source ID: TABLE::Forecast + TABLE::Time Series]",
+                },
+                {
+                    "#": 3,
+                    "Key metric name": "Flagged Revenue Anomalies",
+                    "Value": anomaly_count,
+                    "Narrative": "Anomaly flags identify historical periods where revenue growth deviated materially from the model’s central tendency. [Source ID: TABLE::Risk Observations]",
+                },
+            ]
+        ),
+        "plots": _narrative_table(
+            [
+                {
+                    "#": 0,
+                    "Key metric name": "Trend Plot",
+                    "Value": "Revenue / EBITDA / Net Income / FCF",
+                    "Narrative": "Trend plot data shows how earnings and cash generation evolve together over the modeled operating horizon. [Source ID: TABLE::Trend Analysis]",
+                },
+                {
+                    "#": 1,
+                    "Key metric name": "Cash Flow Bridge Plot",
+                    "Value": "OCF / Maintenance Capex / Debt Service / FCF",
+                    "Narrative": "Cash-flow bridge inputs explain how operating cash is absorbed by maintenance and debt service before reaching free cash flow. [Source ID: TABLE::Cash Flows]",
+                },
+                {
+                    "#": 2,
+                    "Key metric name": "Leverage and Coverage Plot",
+                    "Value": "DSCR / Interest Coverage / Debt Ratio",
+                    "Narrative": "Leverage and coverage plot data supports lender review of resilience, deleveraging pace, and covenant headroom. [Source ID: TABLE::DSCR + TABLE::Coverage + TABLE::Leverage]",
+                },
+                {
+                    "#": 3,
+                    "Key metric name": "Forecast Overlay Plot",
+                    "Value": "Historical / Automated / AR(1)",
+                    "Narrative": "Forecast overlay data helps compare historical revenue progression with forward-looking automated and time-series projections. [Source ID: TABLE::Trend Analysis + TABLE::Forecast + TABLE::Time Series]",
+                },
+                {
+                    "#": 4,
+                    "Key metric name": "Average Interest Coverage",
+                    "Value": _format_ratio(interest_coverage_avg),
+                    "Narrative": "Average interest coverage provides an additional read on how comfortably operating profit can service finance charges. [Source ID: TABLE::Coverage::Interest Coverage]",
+                },
+                {
+                    "#": 5,
+                    "Key metric name": "Terminal Debt Ratio",
+                    "Value": _format_percent(debt_ratio_last),
+                    "Narrative": "Terminal debt ratio indicates the share of the asset base still funded by debt at the end of the modeled horizon. [Source ID: TABLE::Leverage::Debt Ratio]",
+                },
+            ]
+        ),
+    }
+
+
 def _inject_app_theme() -> None:
     """Apply a cassava-style visual shell to the broiler dashboard."""
 
@@ -750,9 +1156,11 @@ def _build_business_plan_markdown(
     dscr_df: pd.DataFrame,
     break_even_df: pd.DataFrame,
     monte_carlo_summary_df: pd.DataFrame,
+    frames: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> str:
     """Build comprehensive business plan narrative text from current model outputs."""
 
+    frames = frames or {}
     annual_row = annual_df.iloc[0].to_dict() if not annual_df.empty else {}
     start_year = int(getattr(assumptions, "production_start_year", 0) or 0)
     horizon = int(getattr(assumptions, "production_horizon_years", 0) or 0)
@@ -774,54 +1182,308 @@ def _build_business_plan_markdown(
     annual_net_income = annual_row.get("net_income")
 
     monte_carlo_p5 = None
-    monte_carlo_p50 = None
+    monte_carlo_mean = None
     monte_carlo_p95 = None
+    monte_carlo_negative_probability = None
     if not monte_carlo_summary_df.empty:
         row = monte_carlo_summary_df.iloc[0]
-        monte_carlo_p5 = row.get("npv_p5")
-        monte_carlo_p50 = row.get("npv_p50")
-        monte_carlo_p95 = row.get("npv_p95")
+        monte_carlo_p5 = row.get("p5_npv")
+        monte_carlo_mean = row.get("mean_npv")
+        monte_carlo_p95 = row.get("p95_npv")
+        monte_carlo_negative_probability = row.get("probability_negative_npv")
 
-    return f"""
-### 1) Executive Summary
-The **{scenario}** strategy for the broiler project is designed for a planning horizon from **{start_year} to {end_year}**.  
-The model estimates a project NPV of **{_format_currency(npv)}** and an IRR of **{irr_text}**, indicating expected value creation under current assumptions.
+    income_df = frames.get("income_statement", pd.DataFrame())
+    balance_df = frames.get("balance_sheet", pd.DataFrame())
+    cash_statement_df = frames.get("cash_flow_statement", pd.DataFrame())
+    cycles_df = frames.get("production_cycles", pd.DataFrame())
+    revenue_annual_df = frames.get("revenue_annual_totals", pd.DataFrame())
+    forecast_df = frames.get("forecast", pd.DataFrame())
+    time_series_df = frames.get("time_series", pd.DataFrame())
+    trend_df = frames.get("trend_analysis", pd.DataFrame())
+    cashflow_df = frames.get("cashflows", pd.DataFrame())
+    coverage_df = frames.get("coverage", pd.DataFrame())
+    leverage_df = frames.get("leverage", pd.DataFrame())
+    risk_df = frames.get("risk_observations", pd.DataFrame())
+    metrics_df = frames.get("metrics", pd.DataFrame())
 
-### 2) Production & Operating Plan
+    if annual_net_income is None:
+        annual_net_income = _last_numeric_value(income_df, ["net_income"])
+    if payback is None and not metrics_df.empty and {"metric", "value"}.issubset(metrics_df.columns):
+        payback_rows = metrics_df.loc[
+            metrics_df["metric"] == "Payback period (years)", "value"
+        ]
+        if not payback_rows.empty:
+            payback = _to_float(payback_rows.iloc[0])
+
+    income_plan_df = _build_display_frame(
+        income_df,
+        [
+            ("Year", ["calendar_year", "year"]),
+            ("Revenue", ["revenue"]),
+            ("COGS", ["cogs"]),
+            ("Gross Profit", ["gross_profit"]),
+            ("Operating Expenses", ["operating_expenses"]),
+            ("EBITDA", ["ebitda"]),
+            ("EBIT", ["ebit"]),
+            ("Interest", ["interest"]),
+            ("Taxes", ["taxes"]),
+            ("Net Income", ["net_income"]),
+            ("EBITDA Margin", ["ebitda_margin"]),
+            ("Net Margin", ["net_margin"]),
+        ],
+    )
+    cash_plan_df = _build_display_frame(
+        cash_statement_df,
+        [
+            ("Year", ["calendar_year", "year"]),
+            ("Operating Cash Flow", ["operating_cash_flow"]),
+            ("Investing Cash Flow", ["investing_cash_flow"]),
+            ("Financing Cash Flow", ["financing_cash_flow"]),
+            ("Net Change in Cash", ["net_change_in_cash"]),
+            ("Ending Cash", ["ending_cash"]),
+        ],
+    )
+    balance_plan_df = _build_display_frame(
+        balance_df,
+        [
+            ("Year", ["calendar_year", "year"]),
+            ("Cash", ["cash"]),
+            ("Working Capital", ["working_capital"]),
+            ("Net PP&E", ["net_ppe"]),
+            ("Total Assets", ["total_assets"]),
+            ("Debt", ["debt"]),
+            ("Equity", ["equity"]),
+            ("Retained Earnings", ["retained_earnings"]),
+            ("Debt to Equity", ["debt_to_equity"]),
+        ],
+    )
+    cycles_plan_df = _build_display_frame(
+        cycles_df,
+        [
+            ("Cycle", ["cycle"]),
+            ("Birds Sold", ["survivors"]),
+            ("Live Weight (kg)", ["live_weight_kg"]),
+            ("Revenue", ["revenue"]),
+            ("Feed Cost", ["feed_cost"]),
+            ("Total Cost", ["total_cost"]),
+            ("Gross Margin", ["gross_margin"]),
+            ("EBITDA", ["ebitda"]),
+        ],
+    )
+    forecast_plan_df = _build_display_frame(
+        forecast_df,
+        [
+            ("Year", ["Year", "year"]),
+            ("Revenue Forecast", ["Revenue forecast"]),
+            ("EBITDA Forecast", ["EBITDA forecast"]),
+        ],
+    )
+    time_series_plan_df = _build_display_frame(
+        time_series_df,
+        [
+            ("Year", ["Year", "year"]),
+            ("AR(1) Revenue Forecast", ["Revenue forecast"]),
+        ],
+    )
+    trend_plot_df = _build_display_frame(
+        trend_df,
+        [
+            ("Year", ["year", "Year"]),
+            ("Revenue", ["revenue"]),
+            ("EBITDA", ["ebitda"]),
+            ("Net Income", ["net_income"]),
+            ("Free Cash Flow", ["free_cash_flow"]),
+            ("Cumulative Cash", ["cumulative_cash"]),
+        ],
+    )
+    cash_plot_df = _build_display_frame(
+        cashflow_df,
+        [
+            ("Year", ["calendar_year", "year"]),
+            ("Operating Cash Flow", ["operating_cash_flow"]),
+            ("Maintenance Capex", ["maintenance_capex"]),
+            ("Debt Service", ["debt_service"]),
+            ("Free Cash Flow", ["free_cash_flow"]),
+            ("Cumulative Cash", ["cumulative_cash"]),
+        ],
+    )
+    leverage_plot_df = _build_display_frame(
+        dscr_df,
+        [("Year", ["year", "Year"]), ("DSCR", ["dscr"])],
+    )
+    coverage_plot_df = _build_display_frame(
+        coverage_df,
+        [
+            ("Year", ["year", "Year"]),
+            ("Interest Coverage", ["interest_coverage"]),
+            ("FCF to Debt Service", ["fcf_to_debt_service"]),
+            ("Maintenance Capex Coverage", ["maintenance_capex_coverage"]),
+        ],
+    )
+    debt_plot_df = _build_display_frame(
+        leverage_df,
+        [
+            ("Year", ["year", "Year"]),
+            ("Debt to Equity", ["debt_to_equity"]),
+            ("Debt Ratio", ["debt_ratio"]),
+            ("Ending Debt", ["ending_debt"]),
+        ],
+    )
+    if leverage_plot_df.empty:
+        leverage_plot_df = coverage_plot_df.copy()
+    elif not coverage_plot_df.empty:
+        leverage_plot_df = leverage_plot_df.merge(
+            coverage_plot_df, on="Year", how="outer"
+        )
+    if leverage_plot_df.empty:
+        leverage_plot_df = debt_plot_df.copy()
+    elif not debt_plot_df.empty:
+        leverage_plot_df = leverage_plot_df.merge(debt_plot_df, on="Year", how="outer")
+
+    forecast_overlay_df = _build_display_frame(
+        forecast_df,
+        [
+            ("Year", ["Year", "year"]),
+            ("Automated Revenue Forecast", ["Revenue forecast"]),
+            ("Automated EBITDA Forecast", ["EBITDA forecast"]),
+        ],
+    )
+    ar1_overlay_df = _build_display_frame(
+        time_series_df,
+        [
+            ("Year", ["Year", "year"]),
+            ("AR(1) Revenue Forecast", ["Revenue forecast"]),
+        ],
+    )
+    if forecast_overlay_df.empty:
+        forecast_overlay_df = ar1_overlay_df.copy()
+    elif not ar1_overlay_df.empty:
+        forecast_overlay_df = forecast_overlay_df.merge(
+            ar1_overlay_df, on="Year", how="outer"
+        )
+
+    section_detail = _financial_section_detailed_writeup(
+        assumptions,
+        income_df,
+        cash_statement_df,
+        balance_df,
+        cycles_df,
+        revenue_annual_df,
+        break_even_df,
+        forecast_df,
+        time_series_df,
+        trend_df,
+        cashflow_df,
+        dscr_df,
+        coverage_df,
+        leverage_df,
+        risk_df,
+    )
+
+    payback_text = (
+        f"{payback:.2f} years" if isinstance(payback, (int, float)) else "N/A years"
+    )
+
+    return f"""# Broiler Chicken Comprehensive Business Plan
+
+## 1. Executive Summary
+The **{scenario}** broiler strategy is modeled across **{start_year} to {end_year}**, with projected NPV of **{_format_currency(npv)}** and IRR of **{irr_text}** under the current assumptions.
+This investment case depends on disciplined operating execution, stable bird pricing, and adequate debt-service headroom through the planning horizon.
+
+## 2. Operating Configuration and Commercial Assumptions
 - Cycles per year: **{assumptions.cycles_per_year}**
 - Birds per cycle: **{assumptions.birds_per_cycle:,}**
 - Mortality rate: **{assumptions.mortality_rate:.2%}**
 - Feed conversion ratio: **{assumptions.feed_conversion_ratio:.2f}**
+- Base live price per kg: **{_format_currency(assumptions.live_price_per_kg)}**
+- Annual price growth: **{assumptions.price_growth:.2%}**
 
-Operational execution should prioritize biosecurity discipline, feed-efficiency optimization, and labor/energy productivity to stabilize margin delivery.
+Operational focus should remain on biosecurity, feed efficiency, processing discipline, and commercial price realization.
 
-### 3) Financial Performance Plan
+## 3. Investment Highlights and Core KPIs
 - Annual revenue (current run): **{_format_currency(annual_revenue)}**
 - Annual EBITDA (current run): **{_format_currency(annual_ebitda)}**
 - Annual net income (current run): **{_format_currency(annual_net_income)}**
 - Average DSCR: **{_format_ratio(avg_dscr)}**
-- Payback period: **{payback if payback is not None else 'N/A'} years**
-
-The finance plan should maintain covenant headroom with DSCR buffers and a liquidity reserve calibrated to debt-service and working-capital variability.
-
-### 4) Market, Pricing, and Break-even Strategy
-- Base live price per kg: **{_format_currency(assumptions.live_price_per_kg)}**
-- Price growth assumption: **{assumptions.price_growth:.2%}**
 - Average break-even price per kg: **{_format_currency(avg_break_even_price)}**
+- Payback period: **{payback_text}**
 
-Commercial strategy should blend contracted offtake and spot exposure to protect downside while preserving upside during favorable price cycles.
+Interpretation: the key screening question is whether margin quality and credit metrics remain resilient enough to support scale-up and external financing.
 
-### 5) Risk Assessment & Mitigation
-- Monte Carlo NPV P5: **{_format_currency(monte_carlo_p5)}**
-- Monte Carlo NPV P50: **{_format_currency(monte_carlo_p50)}**
-- Monte Carlo NPV P95: **{_format_currency(monte_carlo_p95)}**
+## 4. Annual Financial Statements (Reproduced)
+### 4.1 Annual Income Statement
+Interpretation: this section explains revenue generation, cost absorption, and the conversion of farm operations into accounting profit.
+{_to_markdown_table(income_plan_df, rows=25)}
 
-Risk controls should include feed-procurement hedging, contingency mortality protocols, and refinancing reviews to reduce free-cash-flow volatility.
+#### Expanded write-up
+{section_detail.get("income", "")}
 
-### 6) Implementation Roadmap
-1. **Year {start_year}:** commissioning, supplier onboarding, and operating rhythm stabilization.  
-2. **Years {start_year + 1}-{end_year}:** throughput optimization, cost benchmarking, and selective capacity/process upgrades.  
-3. **Annual cadence:** quarterly KPI reviews (margin, DSCR, mortality, FCR), scenario stress tests, and pricing strategy updates.
+### 4.2 Annual Cash Flow Statement
+Interpretation: this section tracks operating cash generation, funding absorption, and resulting liquidity across the projection horizon.
+{_to_markdown_table(cash_plan_df, rows=25)}
+
+#### Expanded write-up
+{section_detail.get("cash", "")}
+
+### 4.3 Annual Balance Sheet
+Interpretation: this section highlights the project’s evolving capital structure, asset base, and equity accumulation.
+{_to_markdown_table(balance_plan_df, rows=25)}
+
+#### Expanded write-up
+{section_detail.get("balance", "")}
+
+## 5. Schedules and Forecasts
+### 5.1 Production Cycle Schedule
+{_to_markdown_table(cycles_plan_df, rows=25)}
+
+### 5.2 Revenue Annual Schedule
+{_to_markdown_table(revenue_annual_df, rows=25)}
+
+### 5.3 Break-even Schedule
+{_to_markdown_table(break_even_df, rows=25)}
+
+### 5.4 Automated Forecast
+{_to_markdown_table(forecast_plan_df, rows=25)}
+
+### 5.5 Time-Series Forecast
+{_to_markdown_table(time_series_plan_df, rows=25)}
+
+#### Expanded write-up
+{section_detail.get("schedules", "")}
+
+#### Forecast interpretation
+{section_detail.get("forecast", "")}
+
+## 6. Plot Data Interpretation
+The following tables reproduce the underlying source series used in the chart layer for lender, investor, and management discussion packs.
+
+### 6.1 Trend Plot Data
+{_to_markdown_table(trend_plot_df, rows=25)}
+
+### 6.2 Cash Flow Bridge Plot Data
+{_to_markdown_table(cash_plot_df, rows=25)}
+
+### 6.3 Leverage and Coverage Plot Data
+{_to_markdown_table(leverage_plot_df, rows=25)}
+
+### 6.4 Forecast Overlay Plot Data
+{_to_markdown_table(forecast_overlay_df, rows=25)}
+
+#### Expanded write-up
+{section_detail.get("plots", "")}
+
+## 7. Risk Assessment and Mitigation
+- Monte Carlo mean NPV: **{_format_currency(monte_carlo_mean)}**
+- Monte Carlo P5 NPV: **{_format_currency(monte_carlo_p5)}**
+- Monte Carlo P95 NPV: **{_format_currency(monte_carlo_p95)}**
+- Probability of negative NPV: **{_format_percent(monte_carlo_negative_probability)}**
+
+Risk controls should center on feed-cost volatility, mortality containment, price protection, and debt-structure calibration.
+
+## 8. Implementation Roadmap
+1. **Year {start_year}:** commissioning, supplier onboarding, staffing stabilization, and cycle-by-cycle operating control.
+2. **Years {start_year + 1}-{end_year}:** throughput optimization, cost benchmarking, margin improvement, and disciplined deleveraging.
+3. **Annual cadence:** quarterly review of margin, DSCR, mortality, feed conversion, pricing realization, and forecast revisions.
 """.strip()
 
 
@@ -5293,13 +5955,28 @@ def main() -> None:
                 dscr_df,
                 break_even_df,
                 monte_carlo_summary_df,
+                frames={
+                    "income_statement": income_df,
+                    "balance_sheet": balance_df,
+                    "cash_flow_statement": cash_statement_df,
+                    "production_cycles": cycles_df,
+                    "revenue_annual_totals": annual_totals_df,
+                    "forecast": forecast_df,
+                    "time_series": time_series_df,
+                    "trend_analysis": trend_df,
+                    "cashflows": cashflow_df,
+                    "coverage": coverage_df,
+                    "leverage": leverage_df,
+                    "risk_observations": risk_df,
+                    "metrics": metrics_df,
+                },
             )
             section_queries = {
                 "Executive Summary": "investment thesis return profile npv irr",
-                "Production & Operating Plan": "broiler operations feed conversion mortality throughput productivity",
-                "Financial Performance Plan": "ebitda cash flow dscr payback financing",
-                "Market, Pricing, and Break-even Strategy": "market demand price benchmark break-even",
-                "Risk Assessment & Mitigation": "risk volatility downside sensitivity scenario",
+                "Operating Configuration and Commercial Assumptions": "broiler operations feed conversion mortality throughput productivity pricing",
+                "Annual Financial Statements": "income statement cash flow balance sheet profitability liquidity leverage",
+                "Schedules and Forecasts": "production schedule revenue schedule break-even forecast time series",
+                "Risk Assessment and Mitigation": "risk volatility downside sensitivity scenario monte carlo debt service",
                 "Implementation Roadmap": "timeline milestones implementation plan",
             }
             rewrite_plan = st.button(

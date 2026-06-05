@@ -6865,5 +6865,38 @@ def main() -> None:
     st.caption("Use the Input Landing Page above to adjust the operating model and financing structure.")
 
 
+# ---------------------------------------------------------------------------
+# Scenario state hooks — called by the parent NumQuants shell to save/restore
+# the full workspace state across sessions.
+# ---------------------------------------------------------------------------
+
+
+def get_state() -> dict:
+    """Return a snapshot of the current scenario store and active selection.
+
+    The scenario_store is a dict[scenario_name, payload] where each payload
+    contains 'assumptions' (a plain dict from dataclasses.asdict), 'ai_settings',
+    and 'investor_benchmarks'. All values are JSON-serializable.
+    """
+    import streamlit as _st
+    return {
+        "scenario_store": _st.session_state.get("scenario_store", {}),
+        "selected_scenario": _st.session_state.get("selected_scenario", "Base Case"),
+    }
+
+
+def set_state(state: dict) -> None:
+    """Pre-populate session_state from a previously saved snapshot.
+
+    Must be called *before* main() so that main() picks up the restored store
+    and the user sees their previous scenario and assumptions.
+    """
+    import streamlit as _st
+    if "scenario_store" in state:
+        _st.session_state["scenario_store"] = state["scenario_store"]
+    if "selected_scenario" in state:
+        _st.session_state["selected_scenario"] = state["selected_scenario"]
+
+
 if __name__ == "__main__":
     main()
